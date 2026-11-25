@@ -68,6 +68,7 @@
       display: flex;
       gap: 6px;
       align-items: center;
+      flex-wrap: wrap;
     }
     button {
       font-family: inherit;
@@ -583,7 +584,6 @@
     }
   }
 
- 
   // 사진 처리: EXIF 추출(실패해도 계속 진행) + 안전 리사이징 압축
   async function handlePhoto(event) {
     const file = event.target.files && event.target.files[0];
@@ -704,7 +704,14 @@
     if (needsCloseBitmap && source.close) source.close();
 
     return canvas.toDataURL('image/jpeg', quality);
-  }    
+  }
+
+  function clearPhoto() {
+    currentPhotoDataUrl = '';
+    document.getElementById('photoInput').value = '';
+    document.getElementById('previewBox').style.display = 'none';
+    document.getElementById('exifStatus').textContent = '';
+  }
 
   // 모달 열기/닫기
   function openModal(id = null) {
@@ -936,7 +943,12 @@
       return;
     }
     const pick = filtered[Math.floor(Math.random() * filtered.length)];
-    alert(`🎲 오늘의 추천 장소!\n\n[${pick.category}] ${pick.name} (★ ${pick.rating})\n지역: ${pick.region || '미지정'}\n메뉴: ${pick.menu || '-'}\n메모: ${pick.memo || '-'}`);
+    alert(`🎲 오늘의 추천 장소!
+
+[${pick.category}] ${pick.name} (★ ${pick.rating})
+지역: ${pick.region || '미지정'}
+메뉴: ${pick.menu || '-'}
+메모: ${pick.memo || '-'}`);
   }
 
   // JSON 백업 및 복원
@@ -958,7 +970,8 @@
       try {
         const imported = JSON.parse(e.target.result);
         if (!Array.isArray(imported)) throw new Error('형식 오류');
-        if (confirm(`총 ${imported.length}개의 기록을 불러옵니다. 기존 데이터와 병합할까요?\n(취소를 누르면 기존 데이터를 덮어씁니다)`)) {
+        if (confirm(`총 ${imported.length}개의 기록을 불러옵니다. 기존 데이터와 병합할까요?
+(취소를 누르면 기존 데이터를 덮어씁니다)`)) {
           const map = new Map(places.map(p => [p.id, p]));
           imported.forEach(item => map.set(item.id, item));
           places = Array.from(map.values());
