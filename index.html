@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>나의 맛집·카페 아카이브</title>
+  <title>방문 장소 아카이브</title>
   <!-- Leaflet CSS (무료 지도 뷰) -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
@@ -415,7 +415,7 @@
 
 <header>
   <div class="header-top">
-    <h1>🍽️ 방문 장소 아카이브 <span class="count-badge" id="totalCount">0곳</span></h1>
+    <h1>📍 방문 장소 아카이브 <span class="count-badge" id="totalCount">0곳</span></h1>
     <div class="header-actions">
       <button class="random-btn" onclick="pickRandom()">🎲 랜덤 추천</button>
       <button id="viewToggleBtn" onclick="toggleView()">🗺️ 지도 뷰</button>
@@ -427,7 +427,7 @@
 
   <div class="controls">
     <div class="search-row">
-      <input type="text" id="searchInput" placeholder="상호명, 지역(#원주), 메뉴, 메모 검색..." oninput="render()" />
+      <input type="text" id="searchInput" placeholder="장소명, 지역(#원주), 메뉴·볼거리, 메모 검색..." oninput="render()" />
       <select id="sortSelect" onchange="render()">
         <option value="dateDesc">최신 방문순</option>
         <option value="ratingDesc">별점 높은순</option>
@@ -440,8 +440,12 @@
       <button class="chip" data-cat="양식" onclick="setCategory('양식')">양식</button>
       <button class="chip" data-cat="일식/중식" onclick="setCategory('일식/중식')">일식/중식</button>
       <button class="chip" data-cat="카페/디저트" onclick="setCategory('카페/디저트')">카페/디저트</button>
-      <button class="chip" data-cat="주점/기타" onclick="setCategory('주점/기타')">주점/기타</button>
-      <button class="chip" data-cat="REVISIT" onclick="setCategory('REVISIT')">👍 재방문 의사</button>
+      <button class="chip" data-cat="주점/기타음식" onclick="setCategory('주점/기타음식')">주점/기타음식</button>
+      <button class="chip" data-cat="관광지/명소" onclick="setCategory('관광지/명소')">관광지/명소</button>
+      <button class="chip" data-cat="공연/전시/문화" onclick="setCategory('공연/전시/문화')">공연/전시/문화</button>
+      <button class="chip" data-cat="숙소/여행" onclick="setCategory('숙소/여행')">숙소/여행</button>
+      <button class="chip" data-cat="쇼핑/기타" onclick="setCategory('쇼핑/기타')">쇼핑/기타</button>
+      <button class="chip" data-cat="REVISIT" onclick="setCategory('REVISIT')">👍 재방문/추천</button>
     </div>
   </div>
 </header>
@@ -450,7 +454,7 @@
   <div id="listView">
     <div class="grid" id="placeGrid"></div>
     <div class="empty" id="emptyState" style="display:none;">
-      아직 기록된 장소가 없습니다.<br/>오른쪽 아래 <b>+</b> 버튼을 눌러 첫 맛집·카페를 추가해 보세요!
+      아직 기록된 장소가 없습니다.<br/>오른쪽 아래 <b>+</b> 버튼을 눌러 맛집·카페·관광지를 추가해 보세요!
     </div>
   </div>
 
@@ -483,8 +487,8 @@
 
       <div class="form-row">
         <div class="form-group">
-          <label>상호명 *</label>
-          <input type="text" id="nameInput" required placeholder="예: 온천집, 블루보틀" />
+          <label>장소명 / 상호명 *</label>
+          <input type="text" id="nameInput" required placeholder="예: 온천집, 예술의전당, 청풍호" />
         </div>
         <div class="form-group">
           <label>카테고리</label>
@@ -493,7 +497,11 @@
             <option value="양식">양식</option>
             <option value="일식/중식">일식/중식</option>
             <option value="카페/디저트">카페/디저트</option>
-            <option value="주점/기타">주점/기타</option>
+            <option value="주점/기타음식">주점/기타음식</option>
+            <option value="관광지/명소">관광지/명소</option>
+            <option value="공연/전시/문화">공연/전시/문화</option>
+            <option value="숙소/여행">숙소/여행</option>
+            <option value="쇼핑/기타">쇼핑/기타</option>
           </select>
         </div>
       </div>
@@ -523,14 +531,14 @@
           </select>
         </div>
         <div class="form-group">
-          <label>대표 메뉴 / 주문 메뉴</label>
-          <input type="text" id="menuInput" placeholder="예: 아메리카노, 까눌레" />
+          <label>대표 메뉴 / 볼거리·포인트</label>
+          <input type="text" id="menuInput" placeholder="예: 아메리카노, 야경 전망대, 1층 중앙석" />
         </div>
       </div>
 
       <div class="form-group">
-        <label>한줄평 & 메모 (주차, 웨이팅, 분위기 등)</label>
-        <textarea id="memoInput" rows="3" placeholder="맛, 가격, 재방문 시 참고할 점을 자유롭게 적어주세요."></textarea>
+        <label>한줄평 & 메모 (주차, 웨이팅, 입장료, 동선 등)</label>
+        <textarea id="memoInput" rows="3" placeholder="맛, 관람 소감, 주차/예약 팁, 재방문 시 참고할 점을 자유롭게 적어주세요."></textarea>
       </div>
 
       <div class="form-row">
@@ -547,7 +555,7 @@
       <div class="form-group">
         <label class="checkbox-row">
           <input type="checkbox" id="revisitInput" checked />
-          <span>다음에 또 방문하고 싶은 곳 (재방문 의사)</span>
+          <span>다시 가거나 지인에게 추천하고 싶은 곳 (재방문/추천)</span>
         </label>
       </div>
 
@@ -601,7 +609,6 @@
       if (res.ok) {
         const data = await res.json();
         const addr = data && data.address ? data.address : {};
-        // 동/읍/면 단위 우선, 없으면 시/군/구 단위 반환
         const candidate =
           addr.quarter ||
           addr.neighbourhood ||
@@ -817,7 +824,11 @@
       document.getElementById('modalTitle').textContent = '장소 정보 수정';
       document.getElementById('placeId').value = item.id;
       document.getElementById('nameInput').value = item.name;
-      document.getElementById('categoryInput').value = item.category;
+      // 기존 '주점/기타' 데이터 호환 처리
+      const catSelect = document.getElementById('categoryInput');
+      const mappedCat = item.category === '주점/기타' ? '주점/기타음식' : item.category;
+      catSelect.value = Array.from(catSelect.options).some(o => o.value === mappedCat) ? mappedCat : '쇼핑/기타';
+
       document.getElementById('regionInput').value = item.region || '';
       document.getElementById('dateInput').value = item.date || '';
       document.getElementById('ratingInput').value = item.rating;
@@ -902,11 +913,12 @@
     const sort = document.getElementById('sortSelect').value;
 
     let list = places.filter(p => {
+      const normalizedCat = p.category === '주점/기타' ? '주점/기타음식' : p.category;
       if (currentCategory === 'REVISIT' && !p.revisit) return false;
-      if (currentCategory !== 'ALL' && currentCategory !== 'REVISIT' && p.category !== currentCategory) return false;
+      if (currentCategory !== 'ALL' && currentCategory !== 'REVISIT' && normalizedCat !== currentCategory) return false;
 
       if (q) {
-        const target = `${p.name} ${p.region} ${p.menu} ${p.memo} ${p.category}`.toLowerCase();
+        const target = `${p.name} ${p.region} ${p.menu} ${p.memo} ${normalizedCat}`.toLowerCase();
         if (!target.includes(q)) return false;
       }
       return true;
@@ -919,6 +931,13 @@
     });
 
     return list;
+  }
+
+  function getPointIcon(category) {
+    if (['관광지/명소', '공연/전시/문화', '숙소/여행', '쇼핑/기타'].includes(category)) {
+      return '✨';
+    }
+    return '🍴';
   }
 
   // 렌더링
@@ -935,6 +954,7 @@
     } else {
       empty.style.display = 'none';
       grid.innerHTML = filtered.map(p => {
+        const displayCat = p.category === '주점/기타' ? '주점/기타음식' : p.category;
         const query = encodeURIComponent(`${p.region ? p.region + ' ' : ''}${p.name}`);
         const naverUrl = `https://map.naver.com/p/search/${query}`;
         const kakaoUrl = `https://map.kakao.com/?q=${query}`;
@@ -946,8 +966,8 @@
           <article class="card">
             <div class="card-img-wrap">
               ${p.photo ? `<img src="${p.photo}" alt="${escapeHtml(p.name)}" loading="lazy" />` : '<span>📷 사진 없음</span>'}
-              <span class="cat-badge">${escapeHtml(p.category)}</span>
-              ${p.revisit ? '<span class="revisit-badge">재방문 OK</span>' : ''}
+              <span class="cat-badge">${escapeHtml(displayCat)}</span>
+              ${p.revisit ? '<span class="revisit-badge">추천 OK</span>' : ''}
             </div>
             <div class="card-body">
               <div class="card-title-row">
@@ -959,7 +979,7 @@
                 ${p.date ? `<span>📅 ${p.date}</span>` : ''}
                 ${(p.lat && p.lng) ? `<span>📍 GPS 저장됨</span>` : ''}
               </div>
-              ${p.menu ? `<div class="menu-line">🍴 ${escapeHtml(p.menu)}</div>` : ''}
+              ${p.menu ? `<div class="menu-line">${getPointIcon(displayCat)} ${escapeHtml(p.menu)}</div>` : ''}
               ${p.memo ? `<p class="memo-text">${escapeHtml(p.memo)}</p>` : ''}
               <div class="card-footer">
                 <div class="map-links">
@@ -1012,11 +1032,12 @@
 
     list.forEach(p => {
       if (typeof p.lat === 'number' && typeof p.lng === 'number') {
+        const displayCat = p.category === '주점/기타' ? '주점/기타음식' : p.category;
         const marker = L.marker([p.lat, p.lng]).addTo(markerLayer);
         marker.bindPopup(`
           <b>${escapeHtml(p.name)}</b> (★ ${p.rating})<br/>
-          <small>${escapeHtml(p.category)} · ${p.date || ''}</small><br/>
-          ${p.menu ? `<small>메뉴: ${escapeHtml(p.menu)}</small>` : ''}
+          <small>${escapeHtml(displayCat)} · ${p.date || ''}</small><br/>
+          ${p.menu ? `<small>포인트: ${escapeHtml(p.menu)}</small>` : ''}
         `);
         bounds.push([p.lat, p.lng]);
       }
@@ -1035,11 +1056,12 @@
       return;
     }
     const pick = filtered[Math.floor(Math.random() * filtered.length)];
+    const displayCat = pick.category === '주점/기타' ? '주점/기타음식' : pick.category;
     alert(`🎲 오늘의 추천 장소!
 
-[${pick.category}] ${pick.name} (★ ${pick.rating})
+[${displayCat}] ${pick.name} (★ ${pick.rating})
 지역: ${pick.region || '미지정'}
-메뉴: ${pick.menu || '-'}
+포인트/메뉴: ${pick.menu || '-'}
 메모: ${pick.memo || '-'}`);
   }
 
