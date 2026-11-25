@@ -584,7 +584,7 @@
     }
   }
 
-  // 사진 처리: EXIF 추출(실패해도 계속 진행) + 안전 리사이징 압축
+  // 사진 처리: EXIF 추출(pick 제한 제거 + exifr.gps 보조 + lastModified 폴백) + 안전 리사이징 압축
   async function handlePhoto(event) {
     const file = event.target.files && event.target.files[0];
     if (!file) return;
@@ -597,34 +597,56 @@
 
     // 1. EXIF 날짜 및 GPS 추출 (실패해도 사진 등록은 막지 않음)
     try {
-      if (window.exifr) {
-        const exif = await exifr.parse(file, {
-          gps: true,
-          pick: ['DateTimeOriginal', 'CreateDate', 'ModifyDate']
-        });
+      let extractedDate = null;
+      let lat = null;
+      let lng = null;
 
+      if (window.exifr) {
+        const exif = await exifr.parse(file, { gps: true });
         if (exif) {
-          const dt = exif.DateTimeOriginal || exif.CreateDate || exif.ModifyDate;
-          if (dt) {
-            const parsedDate = dt instanceof Date ? dt : new Date(dt);
-            if (!isNaN(parsedDate.getTime())) {
-              const yyyy = parsedDate.getFullYear();
-              const mm = String(parsedDate.getMonth() + 1).padStart(2, '0');
-              const dd = String(parsedDate.getDate()).padStart(2, '0');
-              document.getElementById('dateInput').value = `${yyyy}-${mm}-${dd}`;
-              infoMsgs.push(`촬영일(${yyyy}-${mm}-${dd})`);
-            }
-          }
+          extractedDate = exif.DateTimeOriginal || exif.CreateDate || exif.ModifyDate || null;
           if (typeof exif.latitude === 'number' && typeof exif.longitude === 'number') {
-            document.getElementById('latInput').value = exif.latitude.toFixed(6);
-            document.getElementById('lngInput').value = exif.longitude.toFixed(6);
-            infoMsgs.push('GPS 좌표');
+            lat = exif.latitude;
+            lng = exif.longitude;
+          }
+        }
+
+        // 위 파싱에서 좌표가 비었을 때 exifr.gps()로 한 번 더 시도
+        if ((lat === null || lng === null) && typeof exifr.gps === 'function') {
+          const gpsData = await exifr.gps(file);
+          if (gpsData && typeof gpsData.latitude === 'number' && typeof gpsData.longitude === 'number') {
+            lat = gpsData.latitude;
+            lng = gpsData.longitude;
           }
         }
       }
+
+      // EXIF 날짜가 없으면 파일의 lastModified 타임스탬프 활용
+      if (!extractedDate && typeof file.lastModified === 'number' && file.lastModified > 0) {
+        extractedDate = new Date(file.lastModified);
+        infoMsgs.push('파일 날짜 기준');
+      }
+
+      if (extractedDate) {
+        const parsedDate = extractedDate instanceof Date ? extractedDate : new Date(extractedDate);
+        if (!isNaN(parsedDate.getTime())) {
+          const yyyy = parsedDate.getFullYear();
+          const mm = String(parsedDate.getMonth() + 1).padStart(2, '0');
+          const dd = String(parsedDate.getDate()).padStart(2, '0');
+          document.getElementById('dateInput').value = `${yyyy}-${mm}-${dd}`;
+          if (!infoMsgs.includes('파일 날짜 기준')) {
+            infoMsgs.push(`촬영일(${yyyy}-${mm}-${dd})`);
+          }
+        }
+      }
+
+      if (typeof lat === 'number' && typeof lng === 'number' && !isNaN(lat) && !isNaN(lng)) {
+        document.getElementById('latInput').value = lat.toFixed(6);
+        document.getElementById('lngInput').value = lng.toFixed(6);
+        infoMsgs.push('GPS 좌표');
+      }
     } catch (exifErr) {
       console.warn('EXIF 파싱 건너뜀:', exifErr);
-      infoMsgs.push('메타데이터 미지원 형식');
     }
 
     // 2. 이미지 디코딩 및 리사이징 압축 (createImageBitmap 우선, 실패 시 FileReader+Image 폴백)
