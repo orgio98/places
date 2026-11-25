@@ -393,6 +393,7 @@
       font-size: 0.78rem;
       color: var(--primary);
       margin-top: 4px;
+      line-height: 1.4;
     }
     .checkbox-row {
       display: flex;
@@ -471,7 +472,7 @@
       <input type="hidden" id="placeId" />
 
       <div class="form-group">
-        <label>사진 첨부 (촬영일·GPS 자동 추출)</label>
+        <label>사진 첨부 (촬영일·GPS·지역태그 자동 추출)</label>
         <input type="file" id="photoInput" accept="image/*" onchange="handlePhoto(event)" />
         <div class="exif-status" id="exifStatus"></div>
         <div class="preview-box" id="previewBox">
@@ -499,7 +500,7 @@
 
       <div class="form-row">
         <div class="form-group">
-          <label>지역 태그</label>
+          <label>지역 태그 (GPS 기반 자동입력)</label>
           <input type="text" id="regionInput" placeholder="예: 원주, 남가좌동, 상하이" />
         </div>
         <div class="form-group">
@@ -584,7 +585,64 @@
     }
   }
 
-  // 사진 처리: EXIF 추출(pick 제한 제거 + exifr.gps 보조 + lastModified 폴백) + 안전 리사이징 압축
+  // GPS 좌표 -> 한국어 행정구역(동/읍/면 또는 시/군/구) 역지오코딩 추출
+  async function reverseGeocodeRegion(lat, lng) {
+    // 1차: OpenStreetMap Nominatim (한국어 주소 세부 단위 제공)
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5000);
+      const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lng)}&accept-language=ko`;
+      const res = await fetch(url, {
+        signal: controller.signal,
+        headers: { 'Accept': 'application/json' }
+      });
+      clearTimeout(timer);
+
+      if (res.ok) {
+        const data = await res.json();
+        const addr = data && data.address ? data.address : {};
+        // 동/읍/면 단위 우선, 없으면 시/군/구 단위 반환
+        const candidate =
+          addr.quarter ||
+          addr.neighbourhood ||
+          addr.suburb ||
+          addr.town ||
+          addr.village ||
+          addr.city ||
+          addr.county ||
+          addr.state ||
+          '';
+        if (candidate) {
+          return candidate.trim();
+        }
+      }
+    } catch (err) {
+      console.warn('Nominatim 역지오코딩 실패, 폴백 시도:', err);
+    }
+
+    // 2차 폴백: BigDataCloud 무료 클라이언트 역지오코딩 API
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5000);
+      const url = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${encodeURIComponent(lat)}&longitude=${encodeURIComponent(lng)}&localityLanguage=ko`;
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timer);
+
+      if (res.ok) {
+        const data = await res.json();
+        const candidate = data.locality || data.city || data.principalSubdivision || '';
+        if (candidate) {
+          return candidate.trim();
+        }
+      }
+    } catch (err) {
+      console.warn('BigDataCloud 역지오코딩 실패:', err);
+    }
+
+    return '';
+  }
+
+  // 사진 처리: EXIF 추출 + GPS 역지오코딩 지역태그 자동입력 + 안전 리사이징 압축
   async function handlePhoto(event) {
     const file = event.target.files && event.target.files[0];
     if (!file) return;
@@ -594,12 +652,12 @@
     statusEl.textContent = `사진(${(file.size / 1024 / 1024).toFixed(1)}MB) 처리 중...`;
 
     let infoMsgs = [];
+    let lat = null;
+    let lng = null;
 
-    // 1. EXIF 날짜 및 GPS 추출 (실패해도 사진 등록은 막지 않음)
+    // 1. EXIF 날짜 및 GPS 추출
     try {
       let extractedDate = null;
-      let lat = null;
-      let lng = null;
 
       if (window.exifr) {
         const exif = await exifr.parse(file, { gps: true });
@@ -611,7 +669,6 @@
           }
         }
 
-        // 위 파싱에서 좌표가 비었을 때 exifr.gps()로 한 번 더 시도
         if ((lat === null || lng === null) && typeof exifr.gps === 'function') {
           const gpsData = await exifr.gps(file);
           if (gpsData && typeof gpsData.latitude === 'number' && typeof gpsData.longitude === 'number') {
@@ -621,7 +678,6 @@
         }
       }
 
-      // EXIF 날짜가 없으면 파일의 lastModified 타임스탬프 활용
       if (!extractedDate && typeof file.lastModified === 'number' && file.lastModified > 0) {
         extractedDate = new Date(file.lastModified);
         infoMsgs.push('파일 날짜 기준');
@@ -649,10 +705,11 @@
       console.warn('EXIF 파싱 건너뜀:', exifErr);
     }
 
-    // 2. 이미지 디코딩 및 리사이징 압축 (createImageBitmap 우선, 실패 시 FileReader+Image 폴백)
+    // 2. 이미지 디코딩 및 리사이징 압축
+    let approxKB = 0;
     try {
       currentPhotoDataUrl = await compressImageSafe(file, 800, 0.75);
-      const approxKB = Math.round((currentPhotoDataUrl.length * 3) / 4 / 1024);
+      approxKB = Math.round((currentPhotoDataUrl.length * 3) / 4 / 1024);
       document.getElementById('photoPreview').src = currentPhotoDataUrl;
       document.getElementById('previewBox').style.display = 'block';
 
@@ -663,6 +720,21 @@
       console.error('이미지 압축 실패:', imgErr);
       statusEl.style.color = 'var(--danger)';
       statusEl.textContent = `❌ 사진 불러오기 실패: ${file.type || '알 수 없는 형식'} (${imgErr.message || '디코딩 오류'})`;
+      return;
+    }
+
+    // 3. GPS 좌표가 있으면 지역 태그 자동 역지오코딩 조회 (수동 입력값 보호)
+    if (typeof lat === 'number' && typeof lng === 'number' && !isNaN(lat) && !isNaN(lng)) {
+      const regionEl = document.getElementById('regionInput');
+      if (!regionEl.value.trim()) {
+        statusEl.textContent = `✅ ${infoMsgs.join(', ')} · 압축 완료(~${approxKB}KB) · 지역명 조회 중...`;
+        const detectedRegion = await reverseGeocodeRegion(lat, lng);
+        if (detectedRegion && !regionEl.value.trim()) {
+          regionEl.value = detectedRegion;
+          infoMsgs.push(`지역(${detectedRegion})`);
+        }
+        statusEl.textContent = `✅ ${infoMsgs.join(', ')} · 압축 완료(~${approxKB}KB)`;
+      }
     }
   }
 
@@ -672,7 +744,6 @@
     let height = 0;
     let needsCloseBitmap = false;
 
-    // iOS Safari에서 대용량/HEIC 디코딩에 유리한 createImageBitmap 먼저 시도
     if (typeof createImageBitmap === 'function') {
       try {
         source = await createImageBitmap(file);
@@ -684,7 +755,6 @@
       }
     }
 
-    // 폴백: FileReader + HTMLImageElement
     if (!source) {
       const dataUrl = await new Promise((resolve, reject) => {
         const reader = new FileReader();
