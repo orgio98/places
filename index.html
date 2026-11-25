@@ -20,6 +20,7 @@
       --accent: #f59e0b;
       --border: #e2e8f0;
       --danger: #ef4444;
+      --success: #10b981;
       --radius: 14px;
     }
 
@@ -79,13 +80,14 @@
       border: 1px solid var(--border);
       background: #fff;
       color: var(--text);
-      padding: 7px 12px;
+      padding: 7px 11px;
       border-radius: 9px;
-      font-size: 0.84rem;
+      font-size: 0.82rem;
       font-weight: 600;
       transition: all 0.15s;
     }
     button:active { transform: scale(0.97); }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
     button.primary {
       background: var(--primary);
       color: #fff;
@@ -97,11 +99,46 @@
       color: #b45309;
       border-color: #fde68a;
     }
+    button.sync-btn {
+      background: #f0fdf4;
+      color: #15803d;
+      border-color: #bbf7d0;
+    }
+    button.sync-btn.unconfigured {
+      background: #f8fafc;
+      color: #475569;
+      border-color: var(--border);
+    }
+
+    /* Sync Banner */
+    .sync-bar {
+      max-width: 1100px;
+      margin: 8px auto 0;
+      font-size: 0.78rem;
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      background: #f8fafc;
+      padding: 6px 10px;
+      border-radius: 8px;
+      border: 1px solid #eef2f6;
+    }
+    .sync-quick-btns {
+      display: flex;
+      gap: 5px;
+    }
+    .sync-quick-btns button {
+      padding: 3px 8px;
+      font-size: 0.76rem;
+    }
 
     /* Controls & Filters */
     .controls {
       max-width: 1100px;
-      margin: 12px auto 0;
+      margin: 10px auto 0;
       display: flex;
       flex-direction: column;
       gap: 8px;
@@ -294,7 +331,7 @@
     /* Map View */
     #mapView {
       display: none;
-      height: calc(100vh - 170px);
+      height: calc(100vh - 190px);
       min-height: 420px;
       border-radius: var(--radius);
       overflow: hidden;
@@ -411,6 +448,24 @@
       justify-content: flex-end;
       gap: 8px;
       margin-top: 16px;
+      flex-wrap: wrap;
+    }
+    .help-box {
+      background: #f8fafc;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 0.8rem;
+      color: #475569;
+      line-height: 1.5;
+      margin-bottom: 12px;
+    }
+    .gist-log {
+      font-size: 0.8rem;
+      color: var(--primary);
+      margin-top: 8px;
+      white-space: pre-line;
+      line-height: 1.45;
     }
   </style>
 </head>
@@ -420,11 +475,20 @@
   <div class="header-top">
     <h1>📍 방문 장소 아카이브 <span class="count-badge" id="totalCount">0곳</span></h1>
     <div class="header-actions">
-      <button class="random-btn" onclick="pickRandom()">🎲 랜덤 추천</button>
-      <button id="viewToggleBtn" onclick="toggleView()">🗺️ 지도 뷰</button>
+      <button class="sync-btn unconfigured" id="syncConfigBtn" onclick="openSyncModal()">☁️ 동기화 설정</button>
+      <button class="random-btn" onclick="pickRandom()">🎲 랜덤</button>
+      <button id="viewToggleBtn" onclick="toggleView()">🗺️ 지도</button>
       <button onclick="exportData()">백업</button>
       <button onclick="document.getElementById('importFile').click()">복원</button>
       <input type="file" id="importFile" accept=".json" style="display:none" onchange="importData(event)" />
+    </div>
+  </div>
+
+  <div class="sync-bar" id="syncBar">
+    <span id="syncStatusText">☁️ GitHub Gist 미연결 (iPhone·iPad 동기화를 원하면 우측 상단 [동기화 설정]을 눌러주세요)</span>
+    <div class="sync-quick-btns" id="syncQuickBtns" style="display:none;">
+      <button type="button" id="quickPullBtn" onclick="syncFromGist(false)">⬇️ 가져오기</button>
+      <button type="button" id="quickPushBtn" onclick="syncToGist(false)">⬆️ 올리기</button>
     </div>
   </div>
 
@@ -570,35 +634,478 @@
   </div>
 </div>
 
+<!-- GitHub Gist 동기화 설정 모달 -->
+<div class="modal-backdrop" id="syncModal">
+  <div class="modal">
+    <h2>
+      <span>☁️ GitHub Gist 기기 간 동기화</span>
+      <button onclick="closeSyncModal()" style="border:none;background:none;font-size:1.2rem;">✕</button>
+    </h2>
+
+    <div class="help-box">
+      <b>사용 방법 (iPhone ↔ iPad 동기화)</b><br/>
+      1. GitHub → Settings → Developer settings → Personal access tokens (Classic)에서 <b>gist</b> 권한만 체크한 토큰을 발급받습니다.<br/>
+      2. 첫 번째 기기에서 토큰을 입력하고 <b>[새 Secret Gist 생성]</b>을 누르면 Gist ID가 자동 발급됩니다.<br/>
+      3. 두 번째 기기에서는 동일한 토큰과 발급된 <b>Gist ID</b>를 입력한 뒤 저장하세요. (1MB 초과 방지를 위해 사진은 750KB 단위로 자동 분할 저장됩니다)
+    </div>
+
+    <div class="form-group">
+      <label>GitHub Personal Access Token (gist 권한) *</label>
+      <input type="password" id="gistTokenInput" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" autocomplete="off" />
+    </div>
+
+    <div class="form-group">
+      <label>Gist ID (첫 기기는 아래 '새 Secret Gist 생성' 클릭)</label>
+      <div style="display:flex; gap:6px;">
+        <input type="text" id="gistIdInput" placeholder="예: a1b2c3d4e5f67890..." style="flex:1;" />
+        <button type="button" onclick="createNewGist()">새 Secret Gist 생성</button>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label class="checkbox-row">
+        <input type="checkbox" id="autoPullOnLoadInput" />
+        <span>앱 열 때 Gist에서 자동으로 최신 데이터 병합하기</span>
+      </label>
+    </div>
+
+    <div class="form-group">
+      <label class="checkbox-row">
+        <input type="checkbox" id="autoPushOnSaveInput" />
+        <span>장소 저장·삭제 시 자동으로 Gist에 올리기</span>
+      </label>
+    </div>
+
+    <div class="gist-log" id="gistLog"></div>
+
+    <div class="modal-footer">
+      <button type="button" onclick="clearSyncConfig()" style="color:var(--danger); margin-right:auto;">연결 해제</button>
+      <button type="button" onclick="syncFromGist(false)">⬇️ 지금 가져오기</button>
+      <button type="button" onclick="syncToGist(false)">⬆️ 지금 올리기</button>
+      <button type="button" class="primary" onclick="saveSyncConfig()">설정 저장</button>
+    </div>
+  </div>
+</div>
+
 <!-- 외부 라이브러리: exifr(사진 메타데이터 파싱), Leaflet(지도) -->
 <script src="https://cdn.jsdelivr.net/npm/exifr/dist/lite.umd.js"></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
 <script>
   const STORAGE_KEY = 'visited_places_archive_v1';
+  const DELETED_KEY = 'visited_places_deleted_ids_v1';
+  const SYNC_CFG_KEY = 'visited_places_gist_sync_v1';
+
   let places = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+  let deletedIds = JSON.parse(localStorage.getItem(DELETED_KEY) || '{}');
+  let syncConfig = JSON.parse(localStorage.getItem(SYNC_CFG_KEY) || '{"token":"","gistId":"","autoPull":true,"autoPush":false,"lastSync":""}');
+
   let currentCategory = 'ALL';
   let isMapView = false;
   let mapInstance = null;
   let markerLayer = null;
   let currentPhotoDataUrl = '';
+  let isSyncing = false;
 
   // 초기 실행
-  document.addEventListener('DOMContentLoaded', () => {
+  document.addEventListener('DOMContentLoaded', async () => {
+    updateSyncUI();
     render();
+    if (syncConfig.token && syncConfig.gistId && syncConfig.autoPull) {
+      await syncFromGist(true);
+    }
   });
 
   function saveToStorage() {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(places));
+      localStorage.setItem(DELETED_KEY, JSON.stringify(deletedIds));
     } catch (e) {
       alert('저장 공간이 부족합니다. 상단 [백업] 버튼으로 JSON 파일을 저장한 뒤 오래된 사진 일부를 정리해 주세요.');
     }
   }
 
+  function saveSyncConfigToStorage() {
+    localStorage.setItem(SYNC_CFG_KEY, JSON.stringify(syncConfig));
+    updateSyncUI();
+  }
+
+  function updateSyncUI() {
+    const btn = document.getElementById('syncConfigBtn');
+    const barText = document.getElementById('syncStatusText');
+    const quickBtns = document.getElementById('syncQuickBtns');
+
+    if (syncConfig.token && syncConfig.gistId) {
+      btn.classList.remove('unconfigured');
+      btn.textContent = '☁️ 동기화됨';
+      quickBtns.style.display = 'flex';
+      const shortId = syncConfig.gistId.slice(0, 8) + '...';
+      const last = syncConfig.lastSync ? ` · 최근 동기화: ${syncConfig.lastSync}` : '';
+      barText.textContent = `☁️ Gist 연결됨 (${shortId})${last}`;
+    } else {
+      btn.classList.add('unconfigured');
+      btn.textContent = '☁️ 동기화 설정';
+      quickBtns.style.display = 'none';
+      barText.textContent = '☁️ GitHub Gist 미연결 (iPhone·iPad 동기화를 원하면 [동기화 설정]을 눌러주세요)';
+    }
+  }
+
+  function setSyncBusy(busy, msg = '') {
+    isSyncing = busy;
+    const pullBtn = document.getElementById('quickPullBtn');
+    const pushBtn = document.getElementById('quickPushBtn');
+    if (pullBtn) pullBtn.disabled = busy;
+    if (pushBtn) pushBtn.disabled = busy;
+    if (msg) {
+      document.getElementById('syncStatusText').textContent = msg;
+      const logEl = document.getElementById('gistLog');
+      if (logEl) logEl.textContent = msg;
+    }
+  }
+
+  // 동기화 모달
+  function openSyncModal() {
+    document.getElementById('gistTokenInput').value = syncConfig.token || '';
+    document.getElementById('gistIdInput').value = syncConfig.gistId || '';
+    document.getElementById('autoPullOnLoadInput').checked = syncConfig.autoPull !== false;
+    document.getElementById('autoPushOnSaveInput').checked = !!syncConfig.autoPush;
+    document.getElementById('gistLog').textContent = '';
+    document.getElementById('syncModal').classList.add('open');
+  }
+
+  function closeSyncModal() {
+    document.getElementById('syncModal').classList.remove('open');
+  }
+
+  function saveSyncConfig() {
+    const token = document.getElementById('gistTokenInput').value.trim();
+    const gistId = document.getElementById('gistIdInput').value.trim();
+    const autoPull = document.getElementById('autoPullOnLoadInput').checked;
+    const autoPush = document.getElementById('autoPushOnSaveInput').checked;
+
+    if (!token || !gistId) {
+      alert('GitHub Token과 Gist ID를 모두 입력해 주세요.');
+      return;
+    }
+
+    syncConfig = { ...syncConfig, token, gistId, autoPull, autoPush };
+    saveSyncConfigToStorage();
+    closeSyncModal();
+    alert('Gist 동기화 설정이 저장되었습니다.');
+  }
+
+  function clearSyncConfig() {
+    if (!confirm('이 기기에서 GitHub Gist 동기화 연결을 해제할까요? (로컬 데이터는 유지됩니다)')) return;
+    syncConfig = { token: '', gistId: '', autoPull: true, autoPush: false, lastSync: '' };
+    saveSyncConfigToStorage();
+    closeSyncModal();
+  }
+
+  // 새 Secret Gist 생성
+  async function createNewGist() {
+    const token = document.getElementById('gistTokenInput').value.trim();
+    if (!token) {
+      alert('먼저 GitHub Personal Access Token을 입력해 주세요.');
+      return;
+    }
+    const logEl = document.getElementById('gistLog');
+    logEl.textContent = '⏳ Secret Gist 생성 중...';
+
+    try {
+      const filesPayload = buildGistFilesPayload();
+      const res = await fetch('https://api.github.com/gists', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Accept': 'application/vnd.github+json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          description: 'Visited Places Archive Sync Data',
+          public: false,
+          files: filesPayload
+        })
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.message || `HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+      document.getElementById('gistIdInput').value = data.id;
+      syncConfig.token = token;
+      syncConfig.gistId = data.id;
+      syncConfig.autoPull = document.getElementById('autoPullOnLoadInput').checked;
+      syncConfig.autoPush = document.getElementById('autoPushOnSaveInput').checked;
+      syncConfig.lastSync = formatNow();
+      saveSyncConfigToStorage();
+
+      logEl.textContent = `✅ 새 Secret Gist 생성 완료!
+Gist ID: ${data.id}
+(다른 기기에도 이 Token과 Gist ID를 입력하세요)`;
+    } catch (err) {
+      logEl.textContent = `❌ Gist 생성 실패: ${err.message}`;
+    }
+  }
+
+  // Gist 1MB 제한 우회를 위한 분할 페이로드 구성 (메타데이터 + 750KB 단위 사진 청크)
+  function buildGistFilesPayload(previousFileNames = []) {
+    const metaList = places.map(p => {
+      const { photo, ...rest } = p;
+      return { ...rest, hasPhoto: !!photo };
+    });
+
+    const files = {
+      'places_meta.json': {
+        content: JSON.stringify({
+          version: 1,
+          updatedAt: Date.now(),
+          deletedIds,
+          places: metaList
+        }, null, 2)
+      }
+    };
+
+    const CHUNK_LIMIT = 750 * 1024; // ~750KB per file
+    let chunkIndex = 0;
+    let currentChunk = {};
+    let currentSize = 2;
+
+    for (const p of places) {
+      if (!p.photo) continue;
+      const entryStr = JSON.stringify(p.id) + ':' + JSON.stringify(p.photo) + ',';
+      if (currentSize + entryStr.length > CHUNK_LIMIT && Object.keys(currentChunk).length > 0) {
+        files[`photos_${chunkIndex}.json`] = { content: JSON.stringify(currentChunk) };
+        chunkIndex++;
+        currentChunk = {};
+        currentSize = 2;
+      }
+      currentChunk[p.id] = p.photo;
+      currentSize += entryStr.length;
+    }
+
+    if (Object.keys(currentChunk).length > 0) {
+      files[`photos_${chunkIndex}.json`] = { content: JSON.stringify(currentChunk) };
+      chunkIndex++;
+    }
+
+    // 이전 Gist에 남아 있던 더 높은 번호의 photo 청크 파일은 null로 삭제 처리
+    for (const oldName of previousFileNames) {
+      if (oldName.startsWith('photos_') && !files[oldName]) {
+        files[oldName] = null;
+      }
+    }
+
+    return files;
+  }
+
+  // Gist에서 데이터 읽기 (truncated 파일은 raw_url로 자동 재조회)
+  async function readGistFileContent(fileObj, token) {
+    if (!fileObj) return '';
+    if (!fileObj.truncated && typeof fileObj.content === 'string') {
+      return fileObj.content;
+    }
+    if (fileObj.raw_url) {
+      const res = await fetch(fileObj.raw_url, {
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      });
+      if (res.ok) return await res.text();
+    }
+    return fileObj.content || '';
+  }
+
+  // Gist로 올리기 (원격과 먼저 최신 병합 후 업로드하여 덮어쓰기 사고 방지)
+  async function syncToGist(silent = false) {
+    if (isSyncing) return;
+    const token = (document.getElementById('gistTokenInput')?.value.trim()) || syncConfig.token;
+    const gistId = (document.getElementById('gistIdInput')?.value.trim()) || syncConfig.gistId;
+
+    if (!token || !gistId) {
+      if (!silent) alert('먼저 GitHub Token과 Gist ID를 설정해 주세요.');
+      return;
+    }
+
+    setSyncBusy(true, '⬆️ Gist와 병합 및 업로드 중...');
+
+    try {
+      // 1. 원격 상태 먼저 읽어와 최신 항목 병합
+      const getRes = await fetch(`https://api.github.com/gists/${encodeURIComponent(gistId)}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Accept': 'application/vnd.github+json'
+        },
+        cache: 'no-store'
+      });
+
+      if (!getRes.ok) {
+        const errData = await getRes.json().catch(() => ({}));
+        throw new Error(errData.message || `HTTP ${getRes.status}`);
+      }
+
+      const gistData = await getRes.json();
+      const remoteFiles = gistData.files || {};
+      await mergeRemoteFilesIntoLocal(remoteFiles, token);
+
+      // 2. 병합된 최신 데이터를 분할 업로드
+      const payloadFiles = buildGistFilesPayload(Object.keys(remoteFiles));
+      const patchRes = await fetch(`https://api.github.com/gists/${encodeURIComponent(gistId)}`, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Accept': 'application/vnd.github+json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ files: payloadFiles })
+      });
+
+      if (!patchRes.ok) {
+        const errData = await patchRes.json().catch(() => ({}));
+        throw new Error(errData.message || `HTTP ${patchRes.status}`);
+      }
+
+      syncConfig.token = token;
+      syncConfig.gistId = gistId;
+      syncConfig.lastSync = formatNow();
+      saveSyncConfigToStorage();
+      render();
+
+      const doneMsg = `✅ Gist 업로드 완료 (${places.length}곳 · ${syncConfig.lastSync})`;
+      setSyncBusy(false, doneMsg);
+      if (!silent && document.getElementById('syncModal').classList.contains('open')) {
+        document.getElementById('gistLog').textContent = doneMsg;
+      }
+    } catch (err) {
+      const errMsg = `❌ Gist 업로드 실패: ${err.message}`;
+      setSyncBusy(false, errMsg);
+      if (!silent) alert(errMsg);
+    }
+  }
+
+  // Gist에서 가져오기 (updatedAt 기준 양방향 병합)
+  async function syncFromGist(silent = false) {
+    if (isSyncing) return;
+    const token = (document.getElementById('gistTokenInput')?.value.trim()) || syncConfig.token;
+    const gistId = (document.getElementById('gistIdInput')?.value.trim()) || syncConfig.gistId;
+
+    if (!token || !gistId) {
+      if (!silent) alert('먼저 GitHub Token과 Gist ID를 설정해 주세요.');
+      return;
+    }
+
+    setSyncBusy(true, '⬇️ Gist에서 최신 데이터 가져오는 중...');
+
+    try {
+      const res = await fetch(`https://api.github.com/gists/${encodeURIComponent(gistId)}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Accept': 'application/vnd.github+json'
+        },
+        cache: 'no-store'
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.message || `HTTP ${res.status}`);
+      }
+
+      const gistData = await res.json();
+      const remoteFiles = gistData.files || {};
+      await mergeRemoteFilesIntoLocal(remoteFiles, token);
+
+      syncConfig.token = token;
+      syncConfig.gistId = gistId;
+      syncConfig.lastSync = formatNow();
+      saveSyncConfigToStorage();
+      render();
+
+      const doneMsg = `✅ Gist 동기화 완료 (총 ${places.length}곳 · ${syncConfig.lastSync})`;
+      setSyncBusy(false, doneMsg);
+      if (!silent && document.getElementById('syncModal').classList.contains('open')) {
+        document.getElementById('gistLog').textContent = doneMsg;
+      }
+    } catch (err) {
+      const errMsg = `❌ Gist 가져오기 실패: ${err.message}`;
+      setSyncBusy(false, errMsg);
+      if (!silent) alert(errMsg);
+    }
+  }
+
+  // 원격 Gist 파일들과 로컬 데이터 병합 (updatedAt 및 삭제 기록 반영)
+  async function mergeRemoteFilesIntoLocal(remoteFiles, token) {
+    if (!remoteFiles['places_meta.json']) return;
+
+    const metaRaw = await readGistFileContent(remoteFiles['places_meta.json'], token);
+    if (!metaRaw) return;
+    const metaParsed = JSON.parse(metaRaw);
+    const remotePlaces = Array.isArray(metaParsed.places) ? metaParsed.places : [];
+    const remoteDeleted = metaParsed.deletedIds || {};
+
+    // 삭제 기록 병합 (최신 타임스탬프 유지)
+    for (const [delId, delTime] of Object.entries(remoteDeleted)) {
+      if (!deletedIds[delId] || delTime > deletedIds[delId]) {
+        deletedIds[delId] = delTime;
+      }
+    }
+
+    // 사진 청크 파일 모두 로드
+    const photoMap = {};
+    const photoFileNames = Object.keys(remoteFiles).filter(name => name.startsWith('photos_') && name.endsWith('.json'));
+    for (const fname of photoFileNames) {
+      const chunkRaw = await readGistFileContent(remoteFiles[fname], token);
+      if (chunkRaw) {
+        const chunkObj = JSON.parse(chunkRaw);
+        Object.assign(photoMap, chunkObj);
+      }
+    }
+
+    const localMap = new Map(places.map(p => [p.id, p]));
+
+    for (const rp of remotePlaces) {
+      const delTime = deletedIds[rp.id] || 0;
+      const rUpdated = rp.updatedAt || 0;
+      if (delTime > rUpdated) continue; // 삭제된 기록이 더 최신이면 건너뜀
+
+      const lp = localMap.get(rp.id);
+      const remotePhoto = photoMap[rp.id] || '';
+      const { hasPhoto, ...cleanRemote } = rp;
+
+      if (!lp) {
+        localMap.set(rp.id, { ...cleanRemote, photo: remotePhoto });
+      } else {
+        const lUpdated = lp.updatedAt || 0;
+        if (rUpdated >= lUpdated) {
+          localMap.set(rp.id, {
+            ...cleanRemote,
+            photo: remotePhoto || lp.photo || ''
+          });
+        } else if (!lp.photo && remotePhoto) {
+          lp.photo = remotePhoto;
+        }
+      }
+    }
+
+    // 삭제 시각이 항목 수정 시각보다 최신인 로컬 항목 제거
+    places = Array.from(localMap.values()).filter(p => {
+      const delTime = deletedIds[p.id] || 0;
+      return delTime <= (p.updatedAt || 0);
+    });
+
+    places.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    saveToStorage();
+  }
+
+  function formatNow() {
+    const d = new Date();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mi = String(d.getMinutes()).padStart(2, '0');
+    return `${mm}-${dd} ${hh}:${mi}`;
+  }
+
   // GPS 좌표 -> 한국어 행정구역(동/읍/면 또는 시/군/구) 역지오코딩 추출
   async function reverseGeocodeRegion(lat, lng) {
-    // 1차: OpenStreetMap Nominatim (한국어 주소 세부 단위 제공)
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 5000);
@@ -622,15 +1129,12 @@
           addr.county ||
           addr.state ||
           '';
-        if (candidate) {
-          return candidate.trim();
-        }
+        if (candidate) return candidate.trim();
       }
     } catch (err) {
       console.warn('Nominatim 역지오코딩 실패, 폴백 시도:', err);
     }
 
-    // 2차 폴백: BigDataCloud 무료 클라이언트 역지오코딩 API
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 5000);
@@ -641,9 +1145,7 @@
       if (res.ok) {
         const data = await res.json();
         const candidate = data.locality || data.city || data.principalSubdivision || '';
-        if (candidate) {
-          return candidate.trim();
-        }
+        if (candidate) return candidate.trim();
       }
     } catch (err) {
       console.warn('BigDataCloud 역지오코딩 실패:', err);
@@ -665,7 +1167,6 @@
     let lat = null;
     let lng = null;
 
-    // 1. EXIF 날짜 및 GPS 추출
     try {
       let extractedDate = null;
 
@@ -715,10 +1216,9 @@
       console.warn('EXIF 파싱 건너뜀:', exifErr);
     }
 
-    // 2. 이미지 디코딩 및 리사이징 압축
     let approxKB = 0;
     try {
-      currentPhotoDataUrl = await compressImageSafe(file, 800, 0.75);
+      currentPhotoDataUrl = await compressImageSafe(file, 720, 0.72);
       approxKB = Math.round((currentPhotoDataUrl.length * 3) / 4 / 1024);
       document.getElementById('photoPreview').src = currentPhotoDataUrl;
       document.getElementById('previewBox').style.display = 'block';
@@ -733,7 +1233,6 @@
       return;
     }
 
-    // 3. GPS 좌표가 있으면 지역 태그 자동 역지오코딩 조회 (수동 입력값 보호)
     if (typeof lat === 'number' && typeof lng === 'number' && !isNaN(lat) && !isNaN(lng)) {
       const regionEl = document.getElementById('regionInput');
       if (!regionEl.value.trim()) {
@@ -827,7 +1326,6 @@
       document.getElementById('modalTitle').textContent = '장소 정보 수정';
       document.getElementById('placeId').value = item.id;
       document.getElementById('nameInput').value = item.name;
-      // 기존 '주점/기타' 데이터 호환 처리
       const catSelect = document.getElementById('categoryInput');
       const mappedCat = item.category === '주점/기타' ? '주점/기타음식' : item.category;
       catSelect.value = Array.from(catSelect.options).some(o => o.value === mappedCat) ? mappedCat : '쇼핑/기타';
@@ -861,14 +1359,15 @@
   }
 
   // 저장
-  function savePlace(e) {
+  async function savePlace(e) {
     e.preventDefault();
     const id = document.getElementById('placeId').value;
     const latVal = parseFloat(document.getElementById('latInput').value);
     const lngVal = parseFloat(document.getElementById('lngInput').value);
+    const placeId = id || 'place_' + Date.now();
 
     const record = {
-      id: id || 'place_' + Date.now(),
+      id: placeId,
       name: document.getElementById('nameInput').value.trim(),
       category: document.getElementById('categoryInput').value,
       region: document.getElementById('regionInput').value.trim().replace(/^#/, ''),
@@ -883,6 +1382,8 @@
       updatedAt: Date.now()
     };
 
+    delete deletedIds[placeId];
+
     if (id) {
       const idx = places.findIndex(p => p.id === id);
       if (idx > -1) places[idx] = record;
@@ -893,13 +1394,22 @@
     saveToStorage();
     closeModal();
     render();
+
+    if (syncConfig.token && syncConfig.gistId && syncConfig.autoPush) {
+      await syncToGist(true);
+    }
   }
 
-  function deletePlace(id) {
+  async function deletePlace(id) {
     if (!confirm('이 장소 기록을 삭제할까요?')) return;
     places = places.filter(p => p.id !== id);
+    deletedIds[id] = Date.now();
     saveToStorage();
     render();
+
+    if (syncConfig.token && syncConfig.gistId && syncConfig.autoPush) {
+      await syncToGist(true);
+    }
   }
 
   // 필터 및 정렬
@@ -1011,7 +1521,7 @@
     isMapView = !isMapView;
     document.getElementById('listView').style.display = isMapView ? 'none' : 'block';
     document.getElementById('mapView').style.display = isMapView ? 'block' : 'none';
-    document.getElementById('viewToggleBtn').textContent = isMapView ? '📋 리스트 뷰' : '🗺️ 지도 뷰';
+    document.getElementById('viewToggleBtn').textContent = isMapView ? '📋 리스트' : '🗺️ 지도';
 
     if (isMapView) {
       if (!mapInstance) {
@@ -1090,7 +1600,10 @@
         if (confirm(`총 ${imported.length}개의 기록을 불러옵니다. 기존 데이터와 병합할까요?
 (취소를 누르면 기존 데이터를 덮어씁니다)`)) {
           const map = new Map(places.map(p => [p.id, p]));
-          imported.forEach(item => map.set(item.id, item));
+          imported.forEach(item => {
+            delete deletedIds[item.id];
+            map.set(item.id, item);
+          });
           places = Array.from(map.values());
         } else {
           places = imported;
