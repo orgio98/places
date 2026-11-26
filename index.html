@@ -784,8 +784,6 @@
     sel.value = opts.some(o => o[0] === prev) ? prev : 'ALL';
   }
   let storageReady = false;   // 기기 저장소에서 데이터를 다 불러온 뒤 true
-  let lastAutoPullAt = 0;     // 마지막 자동 가져오기 시각
-  const AUTO_PULL_MIN_INTERVAL = 30 * 1000; // 앱을 자주 오갈 때 과도한 요청 방지
 
   // 초기 실행
   document.addEventListener('DOMContentLoaded', async () => {
@@ -798,26 +796,11 @@
     if (navigator.storage && navigator.storage.persist) {
       navigator.storage.persist().catch(() => {});
     }
-    if (syncConfig.token && syncConfig.gistId && syncConfig.autoPull) {
-      lastAutoPullAt = Date.now();
+    // 자동 가져오기는 앱을 열 때 한 번만 (다른 앱에서 복귀할 때는 하지 않음)
+    if (syncConfig.token && syncConfig.gistId && syncConfig.autoPull !== false) {
       await syncFromGist(true);
     }
   });
-
-  // 다른 앱/탭에 갔다가 돌아왔을 때 자동으로 최신 데이터 가져오기
-  function autoPullOnReturn() {
-    if (document.visibilityState !== 'visible') return;
-    if (!storageReady || isSyncing) return;
-    if (!(syncConfig.token && syncConfig.gistId && syncConfig.autoPull)) return;
-    // 입력 중인 내용과 엇갈리지 않도록 입력 창이 열려 있을 때는 건너뜀
-    if (document.getElementById('placeModal').classList.contains('open')) return;
-    if (document.getElementById('syncModal').classList.contains('open')) return;
-    if (Date.now() - lastAutoPullAt < AUTO_PULL_MIN_INTERVAL) return;
-    lastAutoPullAt = Date.now();
-    syncFromGist(true);
-  }
-  document.addEventListener('visibilitychange', autoPullOnReturn);
-  window.addEventListener('pageshow', (e) => { if (e.persisted) autoPullOnReturn(); });
 
   function openDb() {
     if (dbPromise) return dbPromise;
@@ -1002,8 +985,22 @@
     syncConfig = { ...syncConfig, token, gistId, autoPull, autoPush };
     saveSyncConfigToStorage();
 
-    // 저장 직후 실제로 연결되는지 바로 확인 (결과는 아래 로그에 표시)
-    await syncFromGist(false);
+    // 저장 직후 연결만 확인 (데이터는 가져오지 않음. 결과는 아래 로그에 표시)
+    await testGistConnection(token, gistId);
+  }
+
+  async function testGistConnection(token, gistId) {
+    if (isSyncing) return;
+    setSyncBusy(true, '⏳ Gist 연결 확인 중...');
+    try {
+      const gistData = await githubRequest(`https://api.github.com/gists/${encodeURIComponent(gistId)}`, token);
+      const hasData = !!(gistData.files && gistData.files['places_meta.json']);
+      setSyncBusy(false, hasData
+        ? '✅ 설정 저장 및 연결 확인 완료.'
+        : '✅ 설정 저장 및 연결 확인 완료. 이 Gist에는 아직 장소 데이터가 없습니다. [올리기]를 먼저 실행해 주세요.');
+    } catch (err) {
+      setSyncBusy(false, `❌ 설정은 저장했지만 연결에 실패했습니다: ${err.message}`);
+    }
   }
 
   function clearSyncConfig() {
