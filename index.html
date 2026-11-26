@@ -714,20 +714,40 @@
   let markerLayer = null;
   let currentPhotoDataUrl = '';
   let isSyncing = false;
+  let storageReady = false;   // 기기 저장소에서 데이터를 다 불러온 뒤 true
+  let lastAutoPullAt = 0;     // 마지막 자동 가져오기 시각
+  const AUTO_PULL_MIN_INTERVAL = 30 * 1000; // 앱을 자주 오갈 때 과도한 요청 방지
 
   // 초기 실행
   document.addEventListener('DOMContentLoaded', async () => {
     updateSyncUI();
     await loadFromStorage();
+    storageReady = true;
     render();
     // 브라우저가 저장 공간을 임의로 비우지 않도록 요청 (지원하는 브라우저에서만 동작)
     if (navigator.storage && navigator.storage.persist) {
       navigator.storage.persist().catch(() => {});
     }
     if (syncConfig.token && syncConfig.gistId && syncConfig.autoPull) {
+      lastAutoPullAt = Date.now();
       await syncFromGist(true);
     }
   });
+
+  // 다른 앱/탭에 갔다가 돌아왔을 때 자동으로 최신 데이터 가져오기
+  function autoPullOnReturn() {
+    if (document.visibilityState !== 'visible') return;
+    if (!storageReady || isSyncing) return;
+    if (!(syncConfig.token && syncConfig.gistId && syncConfig.autoPull)) return;
+    // 입력 중인 내용과 엇갈리지 않도록 입력 창이 열려 있을 때는 건너뜀
+    if (document.getElementById('placeModal').classList.contains('open')) return;
+    if (document.getElementById('syncModal').classList.contains('open')) return;
+    if (Date.now() - lastAutoPullAt < AUTO_PULL_MIN_INTERVAL) return;
+    lastAutoPullAt = Date.now();
+    syncFromGist(true);
+  }
+  document.addEventListener('visibilitychange', autoPullOnReturn);
+  window.addEventListener('pageshow', (e) => { if (e.persisted) autoPullOnReturn(); });
 
   function openDb() {
     if (dbPromise) return dbPromise;
@@ -1025,7 +1045,7 @@
         body: JSON.stringify({
           description: 'Visited Places Archive Sync Data',
           public: false,
-          files: buildGistFilesPayload()
+          files: buildFullGistFiles()
         })
       });
 
@@ -1043,55 +1063,107 @@ Gist ID: ${data.id}
     }
   }
 
-  // Gist 1MB 제한 우회를 위한 분할 페이로드 구성 (메타데이터 + 750KB 단위 사진 청크)
-  function buildGistFilesPayload(previousFileNames = []) {
-    const metaList = places.map(p => {
-      const { photo, ...rest } = p;
-      return { ...rest, hasPhoto: !!photo };
-    });
+  // ---------- Gist 파일 구성 ----------
+  // places_meta.json : 사진을 뺀 장소 정보 + 삭제 기록
+  // photos_N.json    : 사진 묶음 (Gist API가 파일당 1MB까지만 내용을 주므로 약 750KB 단위)
 
-    const files = {
-      'places_meta.json': {
-        content: JSON.stringify({
-          version: 1,
-          updatedAt: Date.now(),
-          deletedIds,
-          places: metaList
-        }, null, 2)
-      }
+  const CHUNK_LIMIT = 750 * 1024;
+
+  function buildMetaBody() {
+    return {
+      deletedIds,
+      places: places.map(p => {
+        const { photo, ...rest } = p;
+        return { ...rest, hasPhoto: !!photo };
+      })
     };
+  }
 
-    const CHUNK_LIMIT = 750 * 1024; // ~750KB per file
-    let chunkIndex = 0;
-    let currentChunk = {};
-    let currentSize = 2;
+  function buildMetaFile() {
+    return {
+      content: JSON.stringify({ version: 1, updatedAt: Date.now(), ...buildMetaBody() }, null, 2)
+    };
+  }
 
+  function photoEntrySize(id, photo) {
+    return JSON.stringify(id).length + JSON.stringify(photo).length + 2;
+  }
+
+  // 원격에 이미 있는 사진 묶음(remoteChunks)과 비교해 "달라진 묶음"만 골라낸다.
+  // - 그대로인 사진은 원래 있던 묶음에 그대로 둔다 (묶음이 안 바뀌면 다시 올리지 않음)
+  // - 새로 추가됐거나 교체된 사진만 여유 있는 묶음(또는 새 묶음)에 넣는다
+  // 반환: { files: { 파일명: {content} | null(삭제) }, changedChunks, pendingPhotos }
+  function buildPhotoChunkChanges(remoteChunks = {}) {
+    const localPhotos = new Map();
     for (const p of places) {
-      if (!p.photo) continue;
-      const entryStr = JSON.stringify(p.id) + ':' + JSON.stringify(p.photo) + ',';
-      if (currentSize + entryStr.length > CHUNK_LIMIT && Object.keys(currentChunk).length > 0) {
-        files[`photos_${chunkIndex}.json`] = { content: JSON.stringify(currentChunk) };
-        chunkIndex++;
-        currentChunk = {};
-        currentSize = 2;
+      if (p.photo) localPhotos.set(p.id, p.photo);
+    }
+
+    const placed = new Set();
+    const chunks = [];
+    let maxIndex = -1;
+
+    for (const name of Object.keys(remoteChunks)) {
+      const m = /^photos_(\d+)\.json$/.exec(name);
+      const chunk = {
+        name,
+        index: m ? Number(m[1]) : -1,
+        retire: !m,            // 이름 규칙에 맞지 않는 파일은 비우고 삭제
+        entries: {},
+        size: 2,
+        dirty: false
+      };
+      if (m) maxIndex = Math.max(maxIndex, chunk.index);
+
+      const remoteEntries = remoteChunks[name] || {};
+      for (const id of Object.keys(remoteEntries)) {
+        const photo = remoteEntries[id];
+        const sz = photoEntrySize(id, photo);
+        const unchanged = localPhotos.get(id) === photo;
+        if (!chunk.retire && unchanged && !placed.has(id) && chunk.size + sz <= CHUNK_LIMIT) {
+          chunk.entries[id] = photo;
+          chunk.size += sz;
+          placed.add(id);
+        } else {
+          chunk.dirty = true; // 삭제·교체·중복된 사진이 빠지므로 이 묶음은 다시 올려야 함
+        }
       }
-      currentChunk[p.id] = p.photo;
-      currentSize += entryStr.length;
+      chunks.push(chunk);
     }
+    chunks.sort((a, b) => a.index - b.index);
 
-    if (Object.keys(currentChunk).length > 0) {
-      files[`photos_${chunkIndex}.json`] = { content: JSON.stringify(currentChunk) };
-      chunkIndex++;
-    }
-
-    // 이전 Gist에 남아 있던 더 높은 번호의 photo 청크 파일은 null로 삭제 처리
-    for (const oldName of previousFileNames) {
-      if (oldName.startsWith('photos_') && !files[oldName]) {
-        files[oldName] = null;
+    let pendingPhotos = 0;
+    for (const [id, photo] of localPhotos) {
+      if (placed.has(id)) continue;
+      pendingPhotos++;
+      const sz = photoEntrySize(id, photo);
+      const usable = chunks.filter(c => !c.retire && c.size + sz <= CHUNK_LIMIT);
+      // 어차피 다시 올릴 묶음을 우선 사용하고, 없으면 가장 마지막 묶음, 그것도 없으면 새 묶음
+      let target = usable.find(c => c.dirty) || usable[usable.length - 1];
+      if (!target) {
+        maxIndex++;
+        target = { name: `photos_${maxIndex}.json`, index: maxIndex, retire: false, entries: {}, size: 2, dirty: true };
+        chunks.push(target);
       }
+      target.entries[id] = photo;
+      target.size += sz;
+      target.dirty = true;
+      placed.add(id);
     }
 
-    return files;
+    const files = {};
+    let changedChunks = 0;
+    for (const c of chunks) {
+      if (!c.dirty) continue;
+      changedChunks++;
+      files[c.name] = Object.keys(c.entries).length > 0 ? { content: JSON.stringify(c.entries) } : null;
+    }
+    return { files, changedChunks, pendingPhotos };
+  }
+
+  // 새 Gist를 만들 때 쓰는 전체 파일 목록
+  function buildFullGistFiles() {
+    return { 'places_meta.json': buildMetaFile(), ...buildPhotoChunkChanges({}).files };
   }
 
   // Gist에서 데이터 읽기 (truncated 파일은 raw_url로 자동 재조회)
@@ -1126,7 +1198,7 @@ Gist ID: ${data.id}
     }
   }
 
-  // Gist로 올리기 (원격과 먼저 최신 병합 후 업로드하여 덮어쓰기 사고 방지)
+  // Gist로 올리기 (원격과 먼저 최신 병합 → 달라진 파일만 업로드)
   async function syncToGist(silent = false) {
     if (isSyncing) return;
     const { token, gistId } = getSyncCredentials();
@@ -1143,19 +1215,32 @@ Gist ID: ${data.id}
 
       // 1. 원격 상태 먼저 읽어와 최신 항목 병합
       const gistData = await githubRequest(gistUrl, token);
-      const remoteFiles = gistData.files || {};
-      await mergeRemoteFilesIntoLocal(remoteFiles);
+      const remote = await mergeRemoteFilesIntoLocal(gistData.files || {});
 
-      // 2. 병합된 최신 데이터를 분할 업로드
-      const payloadFiles = buildGistFilesPayload(Object.keys(remoteFiles));
-      await githubRequest(gistUrl, token, {
-        method: 'PATCH',
-        body: JSON.stringify({ files: payloadFiles })
-      });
+      // 2. 원격과 달라진 파일만 추려서 업로드
+      const photoPlan = buildPhotoChunkChanges(remote.chunks);
+      const payloadFiles = { ...photoPlan.files };
+
+      const remoteMetaBody = remote.meta
+        ? { deletedIds: remote.meta.deletedIds || {}, places: Array.isArray(remote.meta.places) ? remote.meta.places : [] }
+        : null;
+      const metaChanged = !remoteMetaBody || JSON.stringify(remoteMetaBody) !== JSON.stringify(buildMetaBody());
+      if (metaChanged) payloadFiles['places_meta.json'] = buildMetaFile();
+
+      let doneDetail = '변경 없음, 이미 최신';
+      if (Object.keys(payloadFiles).length > 0) {
+        await githubRequest(gistUrl, token, {
+          method: 'PATCH',
+          body: JSON.stringify({ files: payloadFiles })
+        });
+        doneDetail = photoPlan.changedChunks > 0
+          ? `바뀐 사진 묶음 ${photoPlan.changedChunks}개 전송`
+          : '사진 변경 없음, 장소 정보만 전송';
+      }
 
       commitSyncSuccess(token, gistId);
       render();
-      setSyncBusy(false, `✅ Gist 업로드 완료 (${places.length}곳 · ${syncConfig.lastSync})`);
+      setSyncBusy(false, `✅ Gist 업로드 완료 (${places.length}곳 · ${doneDetail} · ${syncConfig.lastSync})`);
     } catch (err) {
       reportSyncError('Gist 업로드 실패', err, silent);
     }
@@ -1175,11 +1260,11 @@ Gist ID: ${data.id}
 
     try {
       const gistData = await githubRequest(`https://api.github.com/gists/${encodeURIComponent(gistId)}`, token);
-      const hadData = await mergeRemoteFilesIntoLocal(gistData.files || {});
+      const remote = await mergeRemoteFilesIntoLocal(gistData.files || {});
 
       commitSyncSuccess(token, gistId);
       render();
-      setSyncBusy(false, hadData
+      setSyncBusy(false, remote.hasData
         ? `✅ Gist 동기화 완료 (총 ${places.length}곳 · ${syncConfig.lastSync})`
         : '⚠️ 연결은 되었지만 이 Gist에 저장된 장소 데이터가 없습니다. Gist ID를 확인하거나 [올리기]를 먼저 실행해 주세요.');
     } catch (err) {
@@ -1188,12 +1273,23 @@ Gist ID: ${data.id}
   }
 
   // 원격 Gist 파일들과 로컬 데이터 병합 (updatedAt 및 삭제 기록 반영)
-  // 반환값: 원격에 장소 데이터 파일이 있었으면 true
+  // 반환: { hasData: 원격에 장소 데이터가 있었는지, meta: 원격 메타 내용, chunks: { 파일명: {id: 사진} } }
   async function mergeRemoteFilesIntoLocal(remoteFiles) {
-    if (!remoteFiles['places_meta.json']) return false;
+    // 사진 묶음 파일 모두 로드 (올리기 때 어떤 묶음이 바뀌었는지 비교하는 데에도 사용)
+    const chunks = {};
+    const photoMap = {};
+    const photoFileNames = Object.keys(remoteFiles).filter(name => name.startsWith('photos_') && name.endsWith('.json'));
+    for (const fname of photoFileNames) {
+      const chunkRaw = await readGistFileContent(remoteFiles[fname]);
+      const chunkObj = chunkRaw ? parseGistJson(chunkRaw, fname) : {};
+      chunks[fname] = (chunkObj && typeof chunkObj === 'object') ? chunkObj : {};
+      Object.assign(photoMap, chunks[fname]);
+    }
 
+    if (!remoteFiles['places_meta.json']) return { hasData: false, meta: null, chunks };
     const metaRaw = await readGistFileContent(remoteFiles['places_meta.json']);
-    if (!metaRaw) return false;
+    if (!metaRaw) return { hasData: false, meta: null, chunks };
+
     const metaParsed = parseGistJson(metaRaw, 'places_meta.json');
     const remotePlaces = Array.isArray(metaParsed.places) ? metaParsed.places : [];
     const remoteDeleted = metaParsed.deletedIds || {};
@@ -1202,17 +1298,6 @@ Gist ID: ${data.id}
     for (const [delId, delTime] of Object.entries(remoteDeleted)) {
       if (!deletedIds[delId] || delTime > deletedIds[delId]) {
         deletedIds[delId] = delTime;
-      }
-    }
-
-    // 사진 청크 파일 모두 로드
-    const photoMap = {};
-    const photoFileNames = Object.keys(remoteFiles).filter(name => name.startsWith('photos_') && name.endsWith('.json'));
-    for (const fname of photoFileNames) {
-      const chunkRaw = await readGistFileContent(remoteFiles[fname]);
-      if (chunkRaw) {
-        const chunkObj = parseGistJson(chunkRaw, fname);
-        Object.assign(photoMap, chunkObj);
       }
     }
 
@@ -1252,7 +1337,7 @@ Gist ID: ${data.id}
     if (!(await saveToStorage(false))) {
       throw new Error('이 기기의 저장 공간이 부족해 병합 결과를 저장하지 못했습니다. [백업] 후 사진이 있는 기록 일부를 정리해 주세요.');
     }
-    return true;
+    return { hasData: true, meta: metaParsed, chunks };
   }
 
   function formatNow() {
