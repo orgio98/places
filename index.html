@@ -149,6 +149,7 @@
     }
     .search-row input {
       flex: 1;
+      min-width: 0;
       padding: 9px 12px;
       border: 1px solid var(--border);
       border-radius: 10px;
@@ -156,7 +157,8 @@
       background: #f8fafc;
     }
     .search-row select {
-      padding: 9px 10px;
+      max-width: 30vw;
+      padding: 9px 6px;
       border: 1px solid var(--border);
       border-radius: 10px;
       font-size: 0.85rem;
@@ -285,6 +287,10 @@
     .region-tag {
       color: var(--primary);
       font-weight: 600;
+    }
+    .country-tag {
+      color: #0f766e;
+      font-weight: 700;
     }
     .menu-line {
       font-size: 0.83rem;
@@ -494,7 +500,10 @@
 
   <div class="controls">
     <div class="search-row">
-      <input type="text" id="searchInput" placeholder="장소명, 지역(#원주), 메뉴·볼거리, 메모 검색..." oninput="render()" />
+      <input type="text" id="searchInput" placeholder="장소명, 국가·지역, 메뉴, 메모 검색..." oninput="render()" />
+      <select id="scopeSelect" onchange="render()" title="국내/해외·나라별 보기">
+        <option value="ALL">전체 지역</option>
+      </select>
       <select id="sortSelect" onchange="render()">
         <option value="dateDesc">최신 방문순</option>
         <option value="ratingDesc">별점 높은순</option>
@@ -575,16 +584,21 @@
 
       <div class="form-row">
         <div class="form-group">
-          <label>지역 태그 (GPS 기반 자동입력)</label>
-          <input type="text" id="regionInput" placeholder="예: 원주, 남가좌동, 상하이" />
+          <label>국가 (GPS 자동입력)</label>
+          <input type="text" id="countryInput" list="countryList" placeholder="대한민국" oninput="countryTouched = true" autocomplete="off" />
+          <datalist id="countryList"></datalist>
         </div>
         <div class="form-group">
-          <label>방문일</label>
-          <input type="date" id="dateInput" />
+          <label>지역 태그 (GPS 자동입력)</label>
+          <input type="text" id="regionInput" placeholder="예: 원주, 남가좌동, 오사카" />
         </div>
       </div>
 
       <div class="form-row">
+        <div class="form-group">
+          <label>방문일</label>
+          <input type="date" id="dateInput" />
+        </div>
         <div class="form-group">
           <label>별점</label>
           <select id="ratingInput">
@@ -597,10 +611,11 @@
             <option value="1">★ (1.0)</option>
           </select>
         </div>
-        <div class="form-group">
-          <label>대표 메뉴 / 볼거리·포인트</label>
-          <input type="text" id="menuInput" placeholder="예: 아메리카노, 야경 전망대, 1층 중앙석" />
-        </div>
+      </div>
+
+      <div class="form-group">
+        <label>대표 메뉴 / 볼거리·포인트</label>
+        <input type="text" id="menuInput" placeholder="예: 아메리카노, 야경 전망대, 1층 중앙석" />
       </div>
 
       <div class="form-group">
@@ -714,6 +729,60 @@
   let markerLayer = null;
   let currentPhotoDataUrl = '';
   let isSyncing = false;
+  let countryTouched = false; // 사용자가 국가 칸을 직접 고쳤으면 GPS 자동입력이 덮어쓰지 않음
+
+  // ---------- 국가(국내/해외) 처리 ----------
+  const HOME_COUNTRY = '대한민국';
+  const HOME_COUNTRY_ALIASES = ['대한민국', '한국', '남한', 'korea', 'south korea', 'republic of korea', 'kr'];
+  const COUNTRY_NAME_OVERRIDES = { HK: '홍콩', MO: '마카오' };
+  const COMMON_COUNTRY_CODES = ['KR', 'JP', 'CN', 'TW', 'HK', 'MO', 'TH', 'VN', 'SG', 'MY', 'ID', 'PH', 'GU', 'MP',
+    'US', 'CA', 'GB', 'FR', 'IT', 'ES', 'PT', 'DE', 'CH', 'AT', 'NL', 'CZ', 'GR', 'TR', 'AE', 'AU', 'NZ'];
+
+  function isHomeCountry(name) {
+    const n = String(name || '').trim().toLowerCase();
+    return n === '' || HOME_COUNTRY_ALIASES.includes(n);
+  }
+
+  // 국가 칸이 비어 있는(예전에 저장한) 기록은 국내로 취급
+  function isOverseas(p) {
+    return !isHomeCountry(p.country);
+  }
+
+  // 국가 코드(JP) -> 한국어 국가명(일본). 같은 나라가 서로 다른 이름으로 저장되지 않도록 통일
+  function countryNameFromCode(code, fallback = '') {
+    const cc = String(code || '').toUpperCase();
+    if (!/^[A-Z]{2}$/.test(cc)) return fallback;
+    if (cc === 'KR') return HOME_COUNTRY;
+    if (COUNTRY_NAME_OVERRIDES[cc]) return COUNTRY_NAME_OVERRIDES[cc];
+    try {
+      return new Intl.DisplayNames(['ko'], { type: 'region' }).of(cc) || fallback;
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  function fillCountryDatalist() {
+    const names = COMMON_COUNTRY_CODES.map(cc => countryNameFromCode(cc)).filter(Boolean);
+    document.getElementById('countryList').innerHTML = names.map(n => `<option value="${escapeHtml(n)}"></option>`).join('');
+  }
+
+  // 국내/해외·나라별 필터 목록을 현재 데이터에 맞게 갱신
+  function updateScopeOptions() {
+    const sel = document.getElementById('scopeSelect');
+    const prev = sel.value || 'ALL';
+    const counts = new Map();
+    for (const p of places) {
+      if (!isOverseas(p)) continue;
+      const c = p.country.trim();
+      counts.set(c, (counts.get(c) || 0) + 1);
+    }
+    const opts = [['ALL', '전체 지역'], ['DOMESTIC', '국내'], ['OVERSEAS', '해외']];
+    Array.from(counts.entries())
+      .sort((a, b) => a[0].localeCompare(b[0], 'ko'))
+      .forEach(([c, n]) => opts.push(['C:' + c, `· ${c} (${n})`]));
+    sel.innerHTML = opts.map(([v, t]) => `<option value="${escapeHtml(v)}">${escapeHtml(t)}</option>`).join('');
+    sel.value = opts.some(o => o[0] === prev) ? prev : 'ALL';
+  }
   let storageReady = false;   // 기기 저장소에서 데이터를 다 불러온 뒤 true
   let lastAutoPullAt = 0;     // 마지막 자동 가져오기 시각
   const AUTO_PULL_MIN_INTERVAL = 30 * 1000; // 앱을 자주 오갈 때 과도한 요청 방지
@@ -721,6 +790,7 @@
   // 초기 실행
   document.addEventListener('DOMContentLoaded', async () => {
     updateSyncUI();
+    fillCountryDatalist();
     await loadFromStorage();
     storageReady = true;
     render();
@@ -1349,8 +1419,9 @@ Gist ID: ${data.id}
     return `${mm}-${dd} ${hh}:${mi}`;
   }
 
-  // GPS 좌표 -> 한국어 행정구역(동/읍/면 또는 시/군/구) 역지오코딩 추출
-  async function reverseGeocodeRegion(lat, lng) {
+  // GPS 좌표 -> { country: 국가명, region: 지역명 }
+  // 국내는 동/읍/면 단위, 해외는 낯선 동네명 대신 도시 단위로 돌려준다.
+  async function reverseGeocode(lat, lng) {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 5000);
@@ -1364,17 +1435,11 @@ Gist ID: ${data.id}
       if (res.ok) {
         const data = await res.json();
         const addr = data && data.address ? data.address : {};
-        const candidate =
-          addr.quarter ||
-          addr.neighbourhood ||
-          addr.suburb ||
-          addr.town ||
-          addr.village ||
-          addr.city ||
-          addr.county ||
-          addr.state ||
-          '';
-        if (candidate) return candidate.trim();
+        const country = countryNameFromCode(addr.country_code, addr.country || '');
+        const region = isHomeCountry(country)
+          ? (addr.quarter || addr.neighbourhood || addr.suburb || addr.town || addr.village || addr.city || addr.county || addr.state || '')
+          : (addr.city || addr.town || addr.village || addr.municipality || addr.county || addr.province || addr.state || addr.region || '');
+        if (country || region) return { country: country.trim(), region: region.trim() };
       }
     } catch (err) {
       console.warn('Nominatim 역지오코딩 실패, 폴백 시도:', err);
@@ -1389,14 +1454,17 @@ Gist ID: ${data.id}
 
       if (res.ok) {
         const data = await res.json();
-        const candidate = data.locality || data.city || data.principalSubdivision || '';
-        if (candidate) return candidate.trim();
+        const country = countryNameFromCode(data.countryCode, data.countryName || '');
+        const region = isHomeCountry(country)
+          ? (data.locality || data.city || data.principalSubdivision || '')
+          : (data.city || data.locality || data.principalSubdivision || '');
+        if (country || region) return { country: country.trim(), region: region.trim() };
       }
     } catch (err) {
       console.warn('BigDataCloud 역지오코딩 실패:', err);
     }
 
-    return '';
+    return { country: '', region: '' };
   }
 
   // 사진 처리: EXIF 추출 + GPS 역지오코딩 지역태그 자동입력 + 안전 리사이징 압축
@@ -1480,12 +1548,20 @@ Gist ID: ${data.id}
 
     if (typeof lat === 'number' && typeof lng === 'number' && !isNaN(lat) && !isNaN(lng)) {
       const regionEl = document.getElementById('regionInput');
-      if (!regionEl.value.trim()) {
-        statusEl.textContent = `✅ ${infoMsgs.join(', ')} · 압축 완료(~${approxKB}KB) · 지역명 조회 중...`;
-        const detectedRegion = await reverseGeocodeRegion(lat, lng);
-        if (detectedRegion && !regionEl.value.trim()) {
-          regionEl.value = detectedRegion;
-          infoMsgs.push(`지역(${detectedRegion})`);
+      const countryEl = document.getElementById('countryInput');
+      if (!regionEl.value.trim() || !countryTouched) {
+        statusEl.textContent = `✅ ${infoMsgs.join(', ')} · 압축 완료(~${approxKB}KB) · 국가·지역명 조회 중...`;
+        const geo = await reverseGeocode(lat, lng);
+        if (geo.country && !countryTouched) {
+          countryEl.value = geo.country;
+          if (!isHomeCountry(geo.country)) infoMsgs.push(`국가(${geo.country})`);
+        }
+        if (geo.region && !regionEl.value.trim()) {
+          regionEl.value = geo.region;
+          infoMsgs.push(`지역(${geo.region})`);
+        }
+        if (!geo.country && !geo.region) {
+          infoMsgs.push('국가·지역명 조회 실패(직접 입력해 주세요)');
         }
         statusEl.textContent = `✅ ${infoMsgs.join(', ')} · 압축 완료(~${approxKB}KB)`;
       }
@@ -1575,6 +1651,8 @@ Gist ID: ${data.id}
       const mappedCat = item.category === '주점/기타' ? '주점/기타음식' : item.category;
       catSelect.value = Array.from(catSelect.options).some(o => o.value === mappedCat) ? mappedCat : '쇼핑/기타';
 
+      document.getElementById('countryInput').value = item.country || HOME_COUNTRY;
+      countryTouched = !!item.country;
       document.getElementById('regionInput').value = item.region || '';
       document.getElementById('dateInput').value = item.date || '';
       document.getElementById('ratingInput').value = item.rating;
@@ -1592,6 +1670,8 @@ Gist ID: ${data.id}
     } else {
       document.getElementById('modalTitle').textContent = '새 장소 기록';
       document.getElementById('placeId').value = '';
+      document.getElementById('countryInput').value = HOME_COUNTRY;
+      countryTouched = false;
       document.getElementById('dateInput').value = new Date().toISOString().slice(0, 10);
       document.getElementById('revisitInput').checked = true;
     }
@@ -1610,11 +1690,13 @@ Gist ID: ${data.id}
     const latVal = parseFloat(document.getElementById('latInput').value);
     const lngVal = parseFloat(document.getElementById('lngInput').value);
     const placeId = id || 'place_' + Date.now();
+    const countryVal = document.getElementById('countryInput').value.trim();
 
     const record = {
       id: placeId,
       name: document.getElementById('nameInput').value.trim(),
       category: document.getElementById('categoryInput').value,
+      country: isHomeCountry(countryVal) ? HOME_COUNTRY : countryVal,
       region: document.getElementById('regionInput').value.trim().replace(/^#/, ''),
       date: document.getElementById('dateInput').value,
       rating: parseFloat(document.getElementById('ratingInput').value),
@@ -1669,14 +1751,20 @@ Gist ID: ${data.id}
   function getFilteredPlaces() {
     const q = document.getElementById('searchInput').value.trim().toLowerCase();
     const sort = document.getElementById('sortSelect').value;
+    const scope = document.getElementById('scopeSelect').value;
 
     let list = places.filter(p => {
+      const overseas = isOverseas(p);
+      if (scope === 'DOMESTIC' && overseas) return false;
+      if (scope === 'OVERSEAS' && !overseas) return false;
+      if (scope.startsWith('C:') && !(overseas && p.country.trim() === scope.slice(2))) return false;
+
       const normalizedCat = p.category === '주점/기타' ? '주점/기타음식' : p.category;
       if (currentCategory === 'REVISIT' && !p.revisit) return false;
       if (currentCategory !== 'ALL' && currentCategory !== 'REVISIT' && normalizedCat !== currentCategory) return false;
 
       if (q) {
-        const target = `${p.name} ${p.region} ${p.menu} ${p.memo} ${normalizedCat}`.toLowerCase();
+        const target = `${p.name} ${p.country || ''} ${p.region} ${p.menu} ${p.memo} ${normalizedCat}`.toLowerCase();
         if (!target.includes(q)) return false;
       }
       return true;
@@ -1700,6 +1788,7 @@ Gist ID: ${data.id}
 
   // 렌더링
   function render() {
+    updateScopeOptions();
     const filtered = getFilteredPlaces();
     document.getElementById('totalCount').textContent = `${filtered.length}곳`;
 
@@ -1713,7 +1802,8 @@ Gist ID: ${data.id}
       empty.style.display = 'none';
       grid.innerHTML = filtered.map(p => {
         const displayCat = p.category === '주점/기타' ? '주점/기타음식' : p.category;
-        const query = encodeURIComponent(`${p.region ? p.region + ' ' : ''}${p.name}`);
+        const overseas = isOverseas(p);
+        const query = encodeURIComponent(`${overseas ? p.country.trim() + ' ' : ''}${p.region ? p.region + ' ' : ''}${p.name}`);
         const naverUrl = `https://map.naver.com/p/search/${query}`;
         const kakaoUrl = `https://map.kakao.com/?q=${query}`;
         const googleUrl = (p.lat && p.lng)
@@ -1733,6 +1823,7 @@ Gist ID: ${data.id}
                 <span class="rating">★ ${p.rating.toFixed(1)}</span>
               </div>
               <div class="meta-row">
+                ${overseas ? `<span class="country-tag">🌏 ${escapeHtml(p.country.trim())}</span>` : ''}
                 ${p.region ? `<span class="region-tag">#${escapeHtml(p.region)}</span>` : ''}
                 ${p.date ? `<span>📅 ${p.date}</span>` : ''}
                 ${(p.lat && p.lng) ? `<span>📍 GPS 저장됨</span>` : ''}
@@ -1741,9 +1832,9 @@ Gist ID: ${data.id}
               ${p.memo ? `<p class="memo-text">${escapeHtml(p.memo)}</p>` : ''}
               <div class="card-footer">
                 <div class="map-links">
-                  <a href="${naverUrl}" target="_blank" rel="noopener">네이버</a>
-                  <a href="${kakaoUrl}" target="_blank" rel="noopener">카카오</a>
-                  <a href="${googleUrl}" target="_blank" rel="noopener">구글</a>
+                  ${overseas ? '' : `<a href="${naverUrl}" target="_blank" rel="noopener">네이버</a>
+                  <a href="${kakaoUrl}" target="_blank" rel="noopener">카카오</a>`}
+                  <a href="${googleUrl}" target="_blank" rel="noopener">${overseas ? '구글 지도' : '구글'}</a>
                 </div>
                 <div class="card-btns">
                   <button onclick="openModal('${p.id}')">수정</button>
@@ -1794,7 +1885,7 @@ Gist ID: ${data.id}
         const marker = L.marker([p.lat, p.lng]).addTo(markerLayer);
         marker.bindPopup(`
           <b>${escapeHtml(p.name)}</b> (★ ${p.rating})<br/>
-          <small>${escapeHtml(displayCat)} · ${p.date || ''}</small><br/>
+          <small>${isOverseas(p) ? escapeHtml(p.country.trim()) + ' · ' : ''}${escapeHtml(displayCat)} · ${p.date || ''}</small><br/>
           ${p.menu ? `<small>포인트: ${escapeHtml(p.menu)}</small>` : ''}
         `);
         bounds.push([p.lat, p.lng]);
@@ -1818,7 +1909,7 @@ Gist ID: ${data.id}
     alert(`🎲 오늘의 추천 장소!
 
 [${displayCat}] ${pick.name} (★ ${pick.rating})
-지역: ${pick.region || '미지정'}
+지역: ${[isOverseas(pick) ? pick.country.trim() : '', pick.region].filter(Boolean).join(' ') || '미지정'}
 포인트/메뉴: ${pick.menu || '-'}
 메모: ${pick.memo || '-'}`);
   }
