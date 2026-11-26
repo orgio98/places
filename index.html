@@ -644,7 +644,9 @@
 
     <div class="help-box">
       <b>사용 방법 (iPhone ↔ iPad 동기화)</b><br/>
-      1. GitHub → Settings → Developer settings → Personal access tokens (Classic)에서 <b>gist</b> 권한만 체크한 토큰을 발급받습니다.<br/>
+      1. GitHub → Settings → Developer settings → Personal access tokens에서 토큰을 발급받습니다.<br/>
+      &nbsp;&nbsp;· <b>Tokens (classic)</b>: <b>gist</b> 항목만 체크 (ghp_로 시작)<br/>
+      &nbsp;&nbsp;· <b>Fine-grained tokens</b>: Account permissions → <b>Gists → Read and write</b> 선택 (github_pat_로 시작)<br/>
       2. 첫 번째 기기에서 토큰을 입력하고 <b>[새 Secret Gist 생성]</b>을 누르면 Gist ID가 자동 발급됩니다.<br/>
       3. 두 번째 기기에서는 동일한 토큰과 발급된 <b>Gist ID</b>를 입력한 뒤 저장하세요. (1MB 초과 방지를 위해 사진은 750KB 단위로 자동 분할 저장됩니다)
     </div>
@@ -716,12 +718,14 @@
     }
   });
 
-  function saveToStorage() {
+  function saveToStorage(showAlert = true) {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(places));
       localStorage.setItem(DELETED_KEY, JSON.stringify(deletedIds));
+      return true;
     } catch (e) {
-      alert('저장 공간이 부족합니다. 상단 [백업] 버튼으로 JSON 파일을 저장한 뒤 오래된 사진 일부를 정리해 주세요.');
+      if (showAlert) alert('저장 공간이 부족합니다. 상단 [백업] 버튼으로 JSON 파일을 저장한 뒤 오래된 사진 일부를 정리해 주세요.');
+      return false;
     }
   }
 
@@ -777,9 +781,9 @@
     document.getElementById('syncModal').classList.remove('open');
   }
 
-  function saveSyncConfig() {
-    const token = document.getElementById('gistTokenInput').value.trim();
-    const gistId = document.getElementById('gistIdInput').value.trim();
+  async function saveSyncConfig() {
+    const token = cleanToken(document.getElementById('gistTokenInput').value);
+    const gistId = cleanGistId(document.getElementById('gistIdInput').value);
     const autoPull = document.getElementById('autoPullOnLoadInput').checked;
     const autoPush = document.getElementById('autoPushOnSaveInput').checked;
 
@@ -788,10 +792,13 @@
       return;
     }
 
+    document.getElementById('gistTokenInput').value = token;
+    document.getElementById('gistIdInput').value = gistId;
     syncConfig = { ...syncConfig, token, gistId, autoPull, autoPush };
     saveSyncConfigToStorage();
-    closeSyncModal();
-    alert('Gist 동기화 설정이 저장되었습니다.');
+
+    // 저장 직후 실제로 연결되는지 바로 확인 (결과는 아래 로그에 표시)
+    await syncFromGist(false);
   }
 
   function clearSyncConfig() {
@@ -801,9 +808,95 @@
     closeSyncModal();
   }
 
+  // ---------- GitHub API 공통 헬퍼 ----------
+
+  // 붙여넣기 때 섞여 들어온 공백·줄바꿈·보이지 않는 문자 제거 (헤더에 들어가면 요청 자체가 실패함)
+  function cleanToken(v) {
+    return String(v || '').replace(/[^\x21-\x7E]/g, '');
+  }
+
+  // Gist 주소 전체(https://gist.github.com/아이디/xxxx)를 붙여넣어도 ID만 추출
+  function cleanGistId(v) {
+    const s = String(v || '').trim().replace(/[#?].*$/, '').replace(/\/+$/, '');
+    const last = s.split('/').pop() || '';
+    return last.replace(/[^0-9a-zA-Z]/g, '');
+  }
+
+  function isSyncModalOpen() {
+    return document.getElementById('syncModal').classList.contains('open');
+  }
+
+  // 설정 창이 열려 있으면 입력란 값을, 아니면 저장된 설정을 사용
+  function getSyncCredentials() {
+    let token = '';
+    let gistId = '';
+    if (isSyncModalOpen()) {
+      token = cleanToken(document.getElementById('gistTokenInput').value);
+      gistId = cleanGistId(document.getElementById('gistIdInput').value);
+    }
+    return {
+      token: token || cleanToken(syncConfig.token),
+      gistId: gistId || cleanGistId(syncConfig.gistId)
+    };
+  }
+
+  function explainGithubError(status, apiMessage, rateRemaining) {
+    const detail = apiMessage ? ` [GitHub: ${apiMessage}]` : '';
+    if (status === 401) {
+      return '토큰이 올바르지 않거나 만료되었습니다. 토큰을 다시 복사해 붙여넣거나 새로 발급해 주세요.' + detail;
+    }
+    if (status === 403) {
+      if (rateRemaining === '0') return 'GitHub API 사용 한도를 초과했습니다. 잠시 후 다시 시도해 주세요.' + detail;
+      return '토큰에 Gist 쓰기 권한이 없습니다. classic 토큰은 gist 체크, fine-grained 토큰은 Account permissions → Gists → Read and write가 필요합니다.' + detail;
+    }
+    if (status === 404) {
+      return 'Gist를 찾을 수 없습니다. ① Gist ID가 정확한지 ② 토큰에 gist 권한이 있는지 ③ 토큰과 Gist가 같은 GitHub 계정의 것인지 확인해 주세요.' + detail;
+    }
+    if (status === 422) {
+      return 'GitHub가 업로드 내용을 거부했습니다 (용량 초과 가능성).' + detail;
+    }
+    return `HTTP ${status}` + detail;
+  }
+
+  async function githubRequest(url, token, options = {}) {
+    const headers = {
+      'Authorization': `Bearer ${token}`,
+      'Accept': 'application/vnd.github+json'
+    };
+    if (options.body) headers['Content-Type'] = 'application/json';
+
+    let res;
+    try {
+      res = await fetch(url, { ...options, headers, cache: 'no-store' });
+    } catch (netErr) {
+      throw new Error('GitHub에 연결하지 못했습니다. 인터넷 연결 또는 콘텐츠 차단 앱을 확인해 주세요. (' + (netErr.message || netErr) + ')');
+    }
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(explainGithubError(res.status, errData.message, res.headers.get('x-ratelimit-remaining')));
+    }
+    return res.json();
+  }
+
+  function commitSyncSuccess(token, gistId) {
+    syncConfig.token = token;
+    syncConfig.gistId = gistId;
+    syncConfig.lastSync = formatNow();
+    saveSyncConfigToStorage();
+  }
+
+  function reportSyncError(prefix, err, silent) {
+    const errMsg = `❌ ${prefix}: ${err.message}`;
+    console.error(prefix, err);
+    setSyncBusy(false, errMsg);
+    // 설정 창이 열려 있으면 창 안 로그에 이미 표시되므로 alert 생략
+    if (!silent && !isSyncModalOpen()) alert(errMsg);
+  }
+
   // 새 Secret Gist 생성
   async function createNewGist() {
-    const token = document.getElementById('gistTokenInput').value.trim();
+    const token = cleanToken(document.getElementById('gistTokenInput').value);
     if (!token) {
       alert('먼저 GitHub Personal Access Token을 입력해 주세요.');
       return;
@@ -812,34 +905,20 @@
     logEl.textContent = '⏳ Secret Gist 생성 중...';
 
     try {
-      const filesPayload = buildGistFilesPayload();
-      const res = await fetch('https://api.github.com/gists', {
+      const data = await githubRequest('https://api.github.com/gists', token, {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'application/vnd.github+json',
-          'Content-Type': 'application/json'
-        },
         body: JSON.stringify({
           description: 'Visited Places Archive Sync Data',
           public: false,
-          files: filesPayload
+          files: buildGistFilesPayload()
         })
       });
 
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.message || `HTTP ${res.status}`);
-      }
-
-      const data = await res.json();
+      document.getElementById('gistTokenInput').value = token;
       document.getElementById('gistIdInput').value = data.id;
-      syncConfig.token = token;
-      syncConfig.gistId = data.id;
       syncConfig.autoPull = document.getElementById('autoPullOnLoadInput').checked;
       syncConfig.autoPush = document.getElementById('autoPushOnSaveInput').checked;
-      syncConfig.lastSync = formatNow();
-      saveSyncConfigToStorage();
+      commitSyncSuccess(token, data.id);
 
       logEl.textContent = `✅ 새 Secret Gist 생성 완료!
 Gist ID: ${data.id}
@@ -901,25 +980,41 @@ Gist ID: ${data.id}
   }
 
   // Gist에서 데이터 읽기 (truncated 파일은 raw_url로 자동 재조회)
-  async function readGistFileContent(fileObj, token) {
+  // 주의: raw_url(gist.githubusercontent.com)에는 Authorization 헤더를 붙이면 안 됨.
+  //       헤더가 붙으면 브라우저 CORS 사전요청이 거부되어 "Load failed"가 발생한다.
+  //       Secret Gist의 raw_url은 주소 자체가 열쇠라서 헤더 없이 읽을 수 있다.
+  async function readGistFileContent(fileObj) {
     if (!fileObj) return '';
     if (!fileObj.truncated && typeof fileObj.content === 'string') {
       return fileObj.content;
     }
-    if (fileObj.raw_url) {
-      const res = await fetch(fileObj.raw_url, {
-        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
-      });
-      if (res.ok) return await res.text();
+    if (!fileObj.raw_url) {
+      throw new Error(`${fileObj.filename || 'Gist 파일'}의 전체 내용을 받을 수 없습니다.`);
     }
-    return fileObj.content || '';
+    let res;
+    try {
+      res = await fetch(fileObj.raw_url, { cache: 'no-store' });
+    } catch (netErr) {
+      throw new Error(`${fileObj.filename || 'Gist 파일'} 다운로드 실패 (${netErr.message || netErr})`);
+    }
+    if (!res.ok) {
+      throw new Error(`${fileObj.filename || 'Gist 파일'} 다운로드 실패 (HTTP ${res.status})`);
+    }
+    return await res.text();
+  }
+
+  function parseGistJson(raw, fileName) {
+    try {
+      return JSON.parse(raw);
+    } catch (e) {
+      throw new Error(`${fileName} 내용이 손상되었거나 잘려 있습니다.`);
+    }
   }
 
   // Gist로 올리기 (원격과 먼저 최신 병합 후 업로드하여 덮어쓰기 사고 방지)
   async function syncToGist(silent = false) {
     if (isSyncing) return;
-    const token = (document.getElementById('gistTokenInput')?.value.trim()) || syncConfig.token;
-    const gistId = (document.getElementById('gistIdInput')?.value.trim()) || syncConfig.gistId;
+    const { token, gistId } = getSyncCredentials();
 
     if (!token || !gistId) {
       if (!silent) alert('먼저 GitHub Token과 Gist ID를 설정해 주세요.');
@@ -929,64 +1024,32 @@ Gist ID: ${data.id}
     setSyncBusy(true, '⬆️ Gist와 병합 및 업로드 중...');
 
     try {
+      const gistUrl = `https://api.github.com/gists/${encodeURIComponent(gistId)}`;
+
       // 1. 원격 상태 먼저 읽어와 최신 항목 병합
-      const getRes = await fetch(`https://api.github.com/gists/${encodeURIComponent(gistId)}`, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'application/vnd.github+json'
-        },
-        cache: 'no-store'
-      });
-
-      if (!getRes.ok) {
-        const errData = await getRes.json().catch(() => ({}));
-        throw new Error(errData.message || `HTTP ${getRes.status}`);
-      }
-
-      const gistData = await getRes.json();
+      const gistData = await githubRequest(gistUrl, token);
       const remoteFiles = gistData.files || {};
-      await mergeRemoteFilesIntoLocal(remoteFiles, token);
+      await mergeRemoteFilesIntoLocal(remoteFiles);
 
       // 2. 병합된 최신 데이터를 분할 업로드
       const payloadFiles = buildGistFilesPayload(Object.keys(remoteFiles));
-      const patchRes = await fetch(`https://api.github.com/gists/${encodeURIComponent(gistId)}`, {
+      await githubRequest(gistUrl, token, {
         method: 'PATCH',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'application/vnd.github+json',
-          'Content-Type': 'application/json'
-        },
         body: JSON.stringify({ files: payloadFiles })
       });
 
-      if (!patchRes.ok) {
-        const errData = await patchRes.json().catch(() => ({}));
-        throw new Error(errData.message || `HTTP ${patchRes.status}`);
-      }
-
-      syncConfig.token = token;
-      syncConfig.gistId = gistId;
-      syncConfig.lastSync = formatNow();
-      saveSyncConfigToStorage();
+      commitSyncSuccess(token, gistId);
       render();
-
-      const doneMsg = `✅ Gist 업로드 완료 (${places.length}곳 · ${syncConfig.lastSync})`;
-      setSyncBusy(false, doneMsg);
-      if (!silent && document.getElementById('syncModal').classList.contains('open')) {
-        document.getElementById('gistLog').textContent = doneMsg;
-      }
+      setSyncBusy(false, `✅ Gist 업로드 완료 (${places.length}곳 · ${syncConfig.lastSync})`);
     } catch (err) {
-      const errMsg = `❌ Gist 업로드 실패: ${err.message}`;
-      setSyncBusy(false, errMsg);
-      if (!silent) alert(errMsg);
+      reportSyncError('Gist 업로드 실패', err, silent);
     }
   }
 
   // Gist에서 가져오기 (updatedAt 기준 양방향 병합)
   async function syncFromGist(silent = false) {
     if (isSyncing) return;
-    const token = (document.getElementById('gistTokenInput')?.value.trim()) || syncConfig.token;
-    const gistId = (document.getElementById('gistIdInput')?.value.trim()) || syncConfig.gistId;
+    const { token, gistId } = getSyncCredentials();
 
     if (!token || !gistId) {
       if (!silent) alert('먼저 GitHub Token과 Gist ID를 설정해 주세요.');
@@ -996,48 +1059,27 @@ Gist ID: ${data.id}
     setSyncBusy(true, '⬇️ Gist에서 최신 데이터 가져오는 중...');
 
     try {
-      const res = await fetch(`https://api.github.com/gists/${encodeURIComponent(gistId)}`, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'application/vnd.github+json'
-        },
-        cache: 'no-store'
-      });
+      const gistData = await githubRequest(`https://api.github.com/gists/${encodeURIComponent(gistId)}`, token);
+      const hadData = await mergeRemoteFilesIntoLocal(gistData.files || {});
 
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.message || `HTTP ${res.status}`);
-      }
-
-      const gistData = await res.json();
-      const remoteFiles = gistData.files || {};
-      await mergeRemoteFilesIntoLocal(remoteFiles, token);
-
-      syncConfig.token = token;
-      syncConfig.gistId = gistId;
-      syncConfig.lastSync = formatNow();
-      saveSyncConfigToStorage();
+      commitSyncSuccess(token, gistId);
       render();
-
-      const doneMsg = `✅ Gist 동기화 완료 (총 ${places.length}곳 · ${syncConfig.lastSync})`;
-      setSyncBusy(false, doneMsg);
-      if (!silent && document.getElementById('syncModal').classList.contains('open')) {
-        document.getElementById('gistLog').textContent = doneMsg;
-      }
+      setSyncBusy(false, hadData
+        ? `✅ Gist 동기화 완료 (총 ${places.length}곳 · ${syncConfig.lastSync})`
+        : '⚠️ 연결은 되었지만 이 Gist에 저장된 장소 데이터가 없습니다. Gist ID를 확인하거나 [올리기]를 먼저 실행해 주세요.');
     } catch (err) {
-      const errMsg = `❌ Gist 가져오기 실패: ${err.message}`;
-      setSyncBusy(false, errMsg);
-      if (!silent) alert(errMsg);
+      reportSyncError('Gist 가져오기 실패', err, silent);
     }
   }
 
   // 원격 Gist 파일들과 로컬 데이터 병합 (updatedAt 및 삭제 기록 반영)
-  async function mergeRemoteFilesIntoLocal(remoteFiles, token) {
-    if (!remoteFiles['places_meta.json']) return;
+  // 반환값: 원격에 장소 데이터 파일이 있었으면 true
+  async function mergeRemoteFilesIntoLocal(remoteFiles) {
+    if (!remoteFiles['places_meta.json']) return false;
 
-    const metaRaw = await readGistFileContent(remoteFiles['places_meta.json'], token);
-    if (!metaRaw) return;
-    const metaParsed = JSON.parse(metaRaw);
+    const metaRaw = await readGistFileContent(remoteFiles['places_meta.json']);
+    if (!metaRaw) return false;
+    const metaParsed = parseGistJson(metaRaw, 'places_meta.json');
     const remotePlaces = Array.isArray(metaParsed.places) ? metaParsed.places : [];
     const remoteDeleted = metaParsed.deletedIds || {};
 
@@ -1052,9 +1094,9 @@ Gist ID: ${data.id}
     const photoMap = {};
     const photoFileNames = Object.keys(remoteFiles).filter(name => name.startsWith('photos_') && name.endsWith('.json'));
     for (const fname of photoFileNames) {
-      const chunkRaw = await readGistFileContent(remoteFiles[fname], token);
+      const chunkRaw = await readGistFileContent(remoteFiles[fname]);
       if (chunkRaw) {
-        const chunkObj = JSON.parse(chunkRaw);
+        const chunkObj = parseGistJson(chunkRaw, fname);
         Object.assign(photoMap, chunkObj);
       }
     }
@@ -1092,7 +1134,10 @@ Gist ID: ${data.id}
     });
 
     places.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    saveToStorage();
+    if (!saveToStorage(false)) {
+      throw new Error('이 기기의 브라우저 저장 공간(약 5MB)이 가득 차 병합 결과를 저장하지 못했습니다. [백업] 후 사진이 있는 기록 일부를 정리해 주세요.');
+    }
+    return true;
   }
 
   function formatNow() {
