@@ -698,8 +698,14 @@
   const DELETED_KEY = 'visited_places_deleted_ids_v1';
   const SYNC_CFG_KEY = 'visited_places_gist_sync_v1';
 
-  let places = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-  let deletedIds = JSON.parse(localStorage.getItem(DELETED_KEY) || '{}');
+  // 장소 데이터(사진 포함)는 IndexedDB에 저장. 동기화 설정만 localStorage에 유지.
+  const DB_NAME = 'visited_places_archive_db';
+  const DB_STORE = 'kv';
+  let dbPromise = null;
+  let useLocalFallback = false; // IndexedDB를 쓸 수 없는 환경에서는 기존 localStorage 방식으로 동작
+
+  let places = [];
+  let deletedIds = {};
   let syncConfig = JSON.parse(localStorage.getItem(SYNC_CFG_KEY) || '{"token":"","gistId":"","autoPull":true,"autoPush":false,"lastSync":""}');
 
   let currentCategory = 'ALL';
@@ -712,19 +718,128 @@
   // 초기 실행
   document.addEventListener('DOMContentLoaded', async () => {
     updateSyncUI();
+    await loadFromStorage();
     render();
+    // 브라우저가 저장 공간을 임의로 비우지 않도록 요청 (지원하는 브라우저에서만 동작)
+    if (navigator.storage && navigator.storage.persist) {
+      navigator.storage.persist().catch(() => {});
+    }
     if (syncConfig.token && syncConfig.gistId && syncConfig.autoPull) {
       await syncFromGist(true);
     }
   });
 
-  function saveToStorage(showAlert = true) {
+  function openDb() {
+    if (dbPromise) return dbPromise;
+    dbPromise = new Promise((resolve, reject) => {
+      if (!window.indexedDB) {
+        reject(new Error('IndexedDB 미지원'));
+        return;
+      }
+      let req;
+      try {
+        req = indexedDB.open(DB_NAME, 1);
+      } catch (e) {
+        reject(e);
+        return;
+      }
+      req.onupgradeneeded = () => {
+        if (!req.result.objectStoreNames.contains(DB_STORE)) {
+          req.result.createObjectStore(DB_STORE);
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error('IndexedDB 열기 실패'));
+    });
+    return dbPromise;
+  }
+
+  async function dbRead() {
+    const db = await openDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(DB_STORE, 'readonly');
+      const store = tx.objectStore(DB_STORE);
+      const reqPlaces = store.get('places');
+      const reqDeleted = store.get('deletedIds');
+      tx.oncomplete = () => resolve({ places: reqPlaces.result, deletedIds: reqDeleted.result });
+      tx.onerror = () => reject(tx.error || new Error('IndexedDB 읽기 실패'));
+      tx.onabort = () => reject(tx.error || new Error('IndexedDB 읽기 중단'));
+    });
+  }
+
+  // places와 deletedIds를 한 트랜잭션으로 저장 (둘 다 저장되거나 둘 다 안 되거나)
+  async function dbWrite() {
+    const db = await openDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(DB_STORE, 'readwrite');
+      const store = tx.objectStore(DB_STORE);
+      store.put(places, 'places');
+      store.put(deletedIds, 'deletedIds');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('IndexedDB 쓰기 실패'));
+      tx.onabort = () => reject(tx.error || new Error('IndexedDB 쓰기 중단'));
+    });
+  }
+
+  function readLegacyLocalStorage() {
+    let legacyPlaces = null;
+    let legacyDeleted = {};
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(places));
-      localStorage.setItem(DELETED_KEY, JSON.stringify(deletedIds));
+      const rawPlaces = localStorage.getItem(STORAGE_KEY);
+      if (rawPlaces !== null) {
+        const parsed = JSON.parse(rawPlaces);
+        if (Array.isArray(parsed)) legacyPlaces = parsed;
+      }
+      const parsedDeleted = JSON.parse(localStorage.getItem(DELETED_KEY) || '{}');
+      if (parsedDeleted && typeof parsedDeleted === 'object') legacyDeleted = parsedDeleted;
+    } catch (e) {
+      console.warn('기존 localStorage 데이터 읽기 실패:', e);
+    }
+    return { legacyPlaces, legacyDeleted };
+  }
+
+  // 시작 시 데이터 불러오기. 예전 버전이 localStorage에 남긴 데이터는 최초 1회 IndexedDB로 옮긴다.
+  async function loadFromStorage() {
+    const { legacyPlaces, legacyDeleted } = readLegacyLocalStorage();
+
+    try {
+      const stored = await dbRead();
+
+      if (Array.isArray(stored.places)) {
+        // 이미 IndexedDB를 쓰고 있는 기기
+        places = stored.places;
+        deletedIds = stored.deletedIds || {};
+      } else {
+        // 첫 실행: 기존 데이터를 옮겨 온다
+        places = legacyPlaces || [];
+        deletedIds = legacyDeleted;
+        await dbWrite();
+      }
+
+      // IndexedDB에 안전하게 들어간 것이 확인된 뒤에만 예전 데이터를 지운다
+      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(DELETED_KEY);
+    } catch (e) {
+      console.warn('IndexedDB 사용 불가, localStorage 방식으로 동작:', e);
+      useLocalFallback = true;
+      places = legacyPlaces || [];
+      deletedIds = legacyDeleted;
+    }
+  }
+
+  // 저장 성공 여부(true/false)를 돌려준다
+  async function saveToStorage(showAlert = true) {
+    try {
+      if (useLocalFallback) {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(places));
+        localStorage.setItem(DELETED_KEY, JSON.stringify(deletedIds));
+      } else {
+        await dbWrite();
+      }
       return true;
     } catch (e) {
-      if (showAlert) alert('저장 공간이 부족합니다. 상단 [백업] 버튼으로 JSON 파일을 저장한 뒤 오래된 사진 일부를 정리해 주세요.');
+      console.error('저장 실패:', e);
+      if (showAlert) alert('기기에 저장하지 못했습니다. 저장 공간이 부족할 수 있으니 상단 [백업] 버튼으로 JSON 파일을 저장한 뒤 오래된 사진 일부를 정리해 주세요.');
       return false;
     }
   }
@@ -1134,8 +1249,8 @@ Gist ID: ${data.id}
     });
 
     places.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    if (!saveToStorage(false)) {
-      throw new Error('이 기기의 브라우저 저장 공간(약 5MB)이 가득 차 병합 결과를 저장하지 못했습니다. [백업] 후 사진이 있는 기록 일부를 정리해 주세요.');
+    if (!(await saveToStorage(false))) {
+      throw new Error('이 기기의 저장 공간이 부족해 병합 결과를 저장하지 못했습니다. [백업] 후 사진이 있는 기록 일부를 정리해 주세요.');
     }
     return true;
   }
@@ -1436,7 +1551,7 @@ Gist ID: ${data.id}
       places.unshift(record);
     }
 
-    saveToStorage();
+    await saveToStorage();
     closeModal();
     render();
 
@@ -1449,7 +1564,7 @@ Gist ID: ${data.id}
     if (!confirm('이 장소 기록을 삭제할까요?')) return;
     places = places.filter(p => p.id !== id);
     deletedIds[id] = Date.now();
-    saveToStorage();
+    await saveToStorage();
     render();
 
     if (syncConfig.token && syncConfig.gistId && syncConfig.autoPush) {
@@ -1638,7 +1753,7 @@ Gist ID: ${data.id}
     const file = event.target.files[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
         const imported = JSON.parse(e.target.result);
         if (!Array.isArray(imported)) throw new Error('형식 오류');
@@ -1653,7 +1768,7 @@ Gist ID: ${data.id}
         } else {
           places = imported;
         }
-        saveToStorage();
+        await saveToStorage();
         render();
         alert('복원이 완료되었습니다.');
       } catch (err) {
