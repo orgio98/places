@@ -623,6 +623,11 @@
         <textarea id="memoInput" rows="3" placeholder="맛, 관람 소감, 주차/예약 팁, 재방문 시 참고할 점을 자유롭게 적어주세요."></textarea>
       </div>
 
+      <div class="form-group" style="margin-bottom:8px;">
+        <button type="button" id="useLocationBtn" onclick="fillCurrentLocation()">📍 현재 위치로 입력</button>
+        <div class="exif-status" id="locStatus"></div>
+      </div>
+
       <div class="form-row">
         <div class="form-group">
           <label>위도 (Latitude, 선택)</label>
@@ -1476,6 +1481,8 @@ Gist ID: ${data.id}
     let infoMsgs = [];
     let lat = null;
     let lng = null;
+    let usedCurrentLocation = false;
+    let locationFailMsg = '';
 
     try {
       let extractedDate = null;
@@ -1496,6 +1503,20 @@ Gist ID: ${data.id}
             lat = gpsData.latitude;
             lng = gpsData.longitude;
           }
+        }
+      }
+
+      // 카메라로 바로 찍은 사진은 iOS가 위치 정보를 빼고 넘겨주므로 기기의 현재 위치로 대신한다.
+      // (앨범에서 고른 예전 사진에 지금 위치가 잘못 들어가지 않도록 "방금 찍은 사진"일 때만)
+      if ((lat === null || lng === null) && isFreshCapture(file) && !document.getElementById('latInput').value) {
+        statusEl.textContent = '사진에 위치 정보가 없어 현재 위치를 확인하는 중...';
+        try {
+          const pos = await getCurrentPosition();
+          lat = pos.lat;
+          lng = pos.lng;
+          usedCurrentLocation = true;
+        } catch (geoErr) {
+          locationFailMsg = geoErr.message;
         }
       }
 
@@ -1520,11 +1541,12 @@ Gist ID: ${data.id}
       if (typeof lat === 'number' && typeof lng === 'number' && !isNaN(lat) && !isNaN(lng)) {
         document.getElementById('latInput').value = lat.toFixed(6);
         document.getElementById('lngInput').value = lng.toFixed(6);
-        infoMsgs.push('GPS 좌표');
+        infoMsgs.push(usedCurrentLocation ? '현재 위치 좌표' : 'GPS 좌표');
       }
     } catch (exifErr) {
       console.warn('EXIF 파싱 건너뜀:', exifErr);
     }
+    if (locationFailMsg) infoMsgs.push(`위치 확인 실패: ${locationFailMsg}`);
 
     let approxKB = 0;
     try {
@@ -1544,24 +1566,76 @@ Gist ID: ${data.id}
     }
 
     if (typeof lat === 'number' && typeof lng === 'number' && !isNaN(lat) && !isNaN(lng)) {
-      const regionEl = document.getElementById('regionInput');
-      const countryEl = document.getElementById('countryInput');
-      if (!regionEl.value.trim() || !countryTouched) {
-        statusEl.textContent = `✅ ${infoMsgs.join(', ')} · 압축 완료(~${approxKB}KB) · 국가·지역명 조회 중...`;
-        const geo = await reverseGeocode(lat, lng);
-        if (geo.country && !countryTouched) {
-          countryEl.value = geo.country;
-          if (!isHomeCountry(geo.country)) infoMsgs.push(`국가(${geo.country})`);
-        }
-        if (geo.region && !regionEl.value.trim()) {
-          regionEl.value = geo.region;
-          infoMsgs.push(`지역(${geo.region})`);
-        }
-        if (!geo.country && !geo.region) {
-          infoMsgs.push('국가·지역명 조회 실패(직접 입력해 주세요)');
-        }
-        statusEl.textContent = `✅ ${infoMsgs.join(', ')} · 압축 완료(~${approxKB}KB)`;
+      statusEl.textContent = `✅ ${infoMsgs.join(', ')} · 압축 완료(~${approxKB}KB) · 국가·지역명 조회 중...`;
+      infoMsgs.push(...await applyGeocodeToForm(lat, lng));
+      statusEl.textContent = `✅ ${infoMsgs.join(', ')} · 압축 완료(~${approxKB}KB)`;
+    }
+  }
+
+  // 좌표로 국가·지역 칸 채우기 (이미 입력된 지역, 직접 고친 국가는 건드리지 않음). 안내 문구 목록을 돌려준다.
+  async function applyGeocodeToForm(lat, lng) {
+    const msgs = [];
+    const regionEl = document.getElementById('regionInput');
+    const countryEl = document.getElementById('countryInput');
+    if (regionEl.value.trim() && countryTouched) return msgs;
+
+    const geo = await reverseGeocode(lat, lng);
+    if (geo.country && !countryTouched) {
+      countryEl.value = geo.country;
+      if (!isHomeCountry(geo.country)) msgs.push(`국가(${geo.country})`);
+    }
+    if (geo.region && !regionEl.value.trim()) {
+      regionEl.value = geo.region;
+      msgs.push(`지역(${geo.region})`);
+    }
+    if (!geo.country && !geo.region) {
+      msgs.push('국가·지역명 조회 실패(직접 입력해 주세요)');
+    }
+    return msgs;
+  }
+
+  // 방금(3분 이내) 만들어진 파일 = 카메라로 바로 찍은 사진으로 본다
+  function isFreshCapture(file) {
+    return typeof file.lastModified === 'number' && file.lastModified > 0 &&
+      Math.abs(Date.now() - file.lastModified) < 3 * 60 * 1000;
+  }
+
+  function getCurrentPosition(timeoutMs = 10000) {
+    return new Promise((resolve, reject) => {
+      if (!navigator.geolocation) {
+        reject(new Error('이 브라우저는 위치 기능을 지원하지 않습니다'));
+        return;
       }
+      navigator.geolocation.getCurrentPosition(
+        pos => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+        err => reject(new Error(
+          err.code === 1 ? '위치 권한이 꺼져 있습니다 (아래 [현재 위치로 입력]을 눌러 허용하거나 기기 설정에서 위치 접근을 허용해 주세요)'
+          : err.code === 3 ? '시간 초과'
+          : '현재 위치를 알 수 없습니다')),
+        { enableHighAccuracy: true, timeout: timeoutMs, maximumAge: 60000 }
+      );
+    });
+  }
+
+  // [현재 위치로 입력] 버튼: 좌표와 국가·지역을 지금 있는 곳으로 채운다
+  async function fillCurrentLocation() {
+    const btn = document.getElementById('useLocationBtn');
+    const statusEl = document.getElementById('locStatus');
+    btn.disabled = true;
+    statusEl.style.color = 'var(--primary)';
+    statusEl.textContent = '현재 위치 확인 중...';
+    try {
+      const pos = await getCurrentPosition();
+      document.getElementById('latInput').value = pos.lat.toFixed(6);
+      document.getElementById('lngInput').value = pos.lng.toFixed(6);
+      statusEl.textContent = '✅ 현재 위치 좌표 입력 · 국가·지역명 조회 중...';
+      const msgs = await applyGeocodeToForm(pos.lat, pos.lng);
+      statusEl.textContent = `✅ ${['현재 위치 좌표 입력', ...msgs].join(', ')}`;
+    } catch (err) {
+      statusEl.style.color = 'var(--danger)';
+      statusEl.textContent = `❌ ${err.message}`;
+    } finally {
+      btn.disabled = false;
     }
   }
 
@@ -1637,6 +1711,7 @@ Gist ID: ${data.id}
     const form = document.getElementById('placeForm');
     form.reset();
     clearPhoto();
+    document.getElementById('locStatus').textContent = '';
 
     if (id) {
       const item = places.find(p => p.id === id);
